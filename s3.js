@@ -79,6 +79,26 @@ function uploadPDF(base64) {
     }
 }
 
+async function uploadFile2(base64, mimeType, extension) {
+    try {
+      const base64Data = Buffer.from(base64.replace(/^data:application\/\w+;base64,/, ""), "base64");
+  
+      const randomKey = Date.now().toString(36).substring(0, 5) + Math.random().toString(36).substr(2).substring(0, 4);
+      const params = {
+        Bucket: bucketName,
+        Key: new Date().getTime() + randomKey + extension, // Use proper extension
+        Body: base64Data,
+        ContentEncoding: "base64",
+        ContentType: mimeType, // Correct MIME type
+      };
+  
+      return s3.upload(params).promise(); // Upload to S3 or other service
+    } catch (error) {
+      console.error('Error in uploadFile:', error);
+      return null;
+    }
+  }
+
 // new Date().getFullYear() + (((new Date().getMonth() + 1) + '').length < 2 ? ('0' + (new Date().getMonth() + 1) ): ('' + (new Date().getMonth() + 1))) + 
 // ((new Date().getDate() + '').length < 2 ? ('0' + new Date().getDate() ): ('' + new Date().getDate())) + ((new Date().getHours() + '').length < 2 ? ('0' + new Date().getHours() ): ('' + new Date().getHours())) +
 // ((new Date().getMinutes() + '').length < 2 ? ('0' + new Date().getMinutes() ): ('' + new Date().getMinutes())) 
@@ -218,6 +238,26 @@ function uploadPDFReceipt(base64) {
     }
 }
 
+function uploadPDFReceipt2(base64, name) {
+    try {
+        const base64Data = Buffer.from(base64.replace(/^data:application\/\w+;base64,/, ""), "base64");
+        const randomKey = Date.now().toString(36).substring(0, 5) + Math.random().toString(36).substr(2).substring(0, 4)
+
+        console.log(new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime())
+
+        const params = {
+            Bucket: bucketName,
+            Key: name + ".pdf", // some uuid
+            Body: base64Data,
+            ContentEncoding: "base64", // required
+            contentType: "application/pdf",
+        };
+        return s3.upload(params).promise();
+    } catch {
+        return
+    }
+}
+
 async function downloadImg(imageUrl) {
     try {
         // Download the image from the specified URL
@@ -231,4 +271,4 @@ async function downloadImg(imageUrl) {
     }
 }
 
-module.exports = { uploadFile, uploadPDF, uploadPDFSE, uploadSOF, uploadPDFReceipt, uploadPDFSE2, uploadsignimage, uploadbentopdf, uploadSER, downloadImg };
+module.exports = { uploadFile, uploadPDF,uploadFile2, uploadPDFSE, uploadSOF, uploadPDFReceipt, uploadPDFReceipt2, uploadPDFSE2, uploadsignimage, uploadbentopdf, uploadSER, downloadImg };

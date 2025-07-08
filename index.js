@@ -165,9 +165,10 @@ app.post('/fcmAny', (req, res) => {
     });
 })
 
-const { uploadFile, uploadPDF, uploadPDFSE, uploadSOF, uploadPDFReceipt, uploadPDFSE2, uploadsignimage, uploadbentopdf, uploadSER, downloadImg } = require('./s3.js');
+const { uploadFile, uploadPDF, uploadPDFSE, uploadSOF, uploadPDFReceipt, uploadPDFReceipt2, uploadPDFSE2, uploadsignimage, uploadbentopdf, uploadSER, downloadImg } = require('./s3.js');
 const { result, isNull } = require('lodash');
 const { release } = require('os');
+const { log } = require('console');
 
 app.post('/upload', async (req, res) => {
   console.log('upload');
@@ -208,6 +209,33 @@ app.post('/uploadFilePDF', async (req, res) => {
     res.status(400).send({ message: "Wrong Base 64 Format/ Wrong File" })
   }
 })
+
+app.post('/uploadFilePdfDoc', async (req, res) => {
+  console.log('Received base64 upload');
+  let base64 = req.body.base64;
+
+  // Ensure base64 is valid
+  if (!base64) {
+    return res.status(400).send({ message: 'No base64 data provided' });
+  }
+
+  const mimeTypeMatch = base64.match(/^data:(application\/(pdf|vnd.openxmlformats-officedocument.wordprocessingml.document));base64,/);
+  if (!mimeTypeMatch) {
+    return res.status(400).send({ message: 'Unsupported file type' });
+  }
+
+  const mimeType = mimeTypeMatch[1];
+  const extension = mimeType === 'application/pdf' ? '.pdf' : '.docx';
+
+  const result = await uploadFile(base64, mimeType, extension);
+
+  if (result) {
+    res.status(200).send({ fileURL: result.Location });
+  } else {
+    console.log('Error uploading file');
+    res.status(400).send({ message: 'File upload failed' });
+  }
+});
 
 app.post('/uploadQFPDF', async (req, res) => {
   console.log('uploadQFPDF');
@@ -261,6 +289,20 @@ app.post('/uploadReceiptPDF', async (req, res) => {
   let base64 = req.body.base64
 
   const result = await uploadPDFReceipt(base64)
+  if (result) {
+    res.status(200).send({ imageURL: result ? result.Location : "" })
+  } else {
+    console.log('error');
+    res.status(400).send({ message: "Wrong Base 64 Format/ Wrong File" })
+  }
+})
+
+app.post('/uploadReceiptPDF2', async (req, res) => {
+  console.log('uploadReceiptPDF2');
+  let base64 = req.body.base64
+  let name = req.body.name
+
+  const result = await uploadPDFReceipt2(base64, name)
   if (result) {
     res.status(200).send({ imageURL: result ? result.Location : "" })
   } else {
@@ -323,7 +365,7 @@ app.post('/createUser', async (req, res) => {
 
     console.log('createUser')
 
-    pool.query(`INSERT INTO nano_user(user_name, user_phone_no, user_email,user_state,user_address,user_role, emp_id, login_id, password, active, status, created_at, profile_image, uid, colour,branch) 
+    pool.query(`INSERT INTO nano_user(user_name, user_phone_no, user_email,user_state,user_address,user_role, emp_id, login_id, password, active, status, created_at, profile_image, uid, colour,branch, is_leader) 
     VALUES($1,$2,$3,$4,$5,$6,
       CASE WHEN 'Sales Coordinator' = $6::varchar THEN 'SC' || LPAD(nextval('salescoord'):: varchar, 5, '0')
       WHEN 'Sales Executive' = $6::varchar   THEN 'SE' || LPAD(nextval('salesexec'):: varchar, 5, '0')
@@ -331,9 +373,9 @@ app.post('/createUser', async (req, res) => {
       WHEN 'Finance' = $6::varchar   THEN 'FI' || LPAD(nextval('finance'):: varchar, 5, '0')
       WHEN 'Account' = $6::varchar   THEN 'AC' || LPAD(nextval('account'):: varchar, 5, '0')
        ELSE 'PC' || LPAD(nextval('projectcoordinator'):: varchar, 5, '0') end, 
-      $7,$8,$9,$10,$11,$12,$13,$14,$15)`, [req.body.name, req.body.phone, req.body.email, req.body.state,
+      $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`, [req.body.name, req.body.phone, req.body.email, req.body.state,
     req.body.address, req.body.role, req.body.login_id, req.body.password, req.body.active,
-    req.body.status, req.body.created_at, req.body.profile_image, req.body.uid, req.body.colour, req.body.branch]).then((result) => {
+    req.body.status, req.body.created_at, req.body.profile_image, req.body.uid, req.body.colour, req.body.branch, req.body.is_leader]).then((result) => {
 
       return res.status(200).send({ success: true })
 
@@ -390,6 +432,19 @@ app.post('/getSpecificUser', async (req, res) => {
 app.get('/getUserList', async (req, res) => {
   console.log('getUserList')
 
+  pool.query(`SELECT * FROM nano_user where status = true`).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ message: error, success: false })
+  })
+})
+
+app.get('/getUserListPanel', async (req, res) => {
+  console.log('getUserListPanel')
+
   pool.query(`SELECT * FROM nano_user`).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
@@ -400,19 +455,20 @@ app.get('/getUserList', async (req, res) => {
   })
 })
 
-
 app.post('/updateUserDetails', (req, res) => {
   console.log('updateUserDetails');
 
-  pool.query(`UPDATE nano_user SET (user_name, user_phone_no, user_address, profile_image, user_state, user_role, status,colour, branch ,login_id)
-   = ($1, $2, $3, $4,$5,$6,$7,$8,$9, $11) WHERE uid = $10 `, [req.body.name, req.body.phone, req.body.address, req.body.profile_image, req.body.state, req.body.role, req.body.status, req.body.colour, req.body.branch, req.body.uid, req.body.login_id]).then((result) => {
+  pool.query(`UPDATE nano_user SET (user_name, user_phone_no, user_address, profile_image, user_state, user_role, status,colour, branch, login_id, is_leader) 
+  = ($1, $2, $3, $4, $5, $6, $7, $8, $9, $11, $12) WHERE uid = $10 `,
+    [req.body.name, req.body.phone, req.body.address, req.body.profile_image, req.body.state, req.body.role, req.body.status,
+    req.body.colour, req.body.branch, req.body.uid, req.body.login_id, req.body.is_leader]).then((result) => {
 
-    return res.status(200).send({ success: true })
+      return res.status(200).send({ success: true })
 
-  }).catch((error) => {
-    console.log(error)
-    return res.status(800).send({ success: false })
-  })
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ success: false })
+    })
 
 })
 
@@ -426,9 +482,9 @@ app.post('/createCompany', async (req, res) => {
     req.body.created_at = new Date().getTime()
     console.log('createCompany')
 
-    pool.query(`INSERT INTO sub_company(name, email, state, address, login_id, password, status, uid, created_at) 
-    VALUES($1, $2, $3, $4, $5, $6, true, $7, $8)`, [req.body.name, req.body.email, req.body.state,
-    req.body.address, req.body.login_id, req.body.password, req.body.uid, req.body.created_at,
+    pool.query(`INSERT INTO sub_company(name, email, state, address, login_id, password, status, uid, created_at, name_display, type) 
+    VALUES($1, $2, $3, $4, $5, $6, true, $7, $8, $9, $10)`, [req.body.name, req.body.email, req.body.state,
+    req.body.address, req.body.login_id, req.body.password, req.body.uid, req.body.created_at, req.body.name_display, req.body.type
     ]).then((result) => {
 
       return res.status(200).send({ success: true })
@@ -479,8 +535,8 @@ app.post('/getSpecificCompanyDetail', async (req, res) => {
 app.post('/updateCompany', async (req, res) => {
   console.log('updateCompany')
 
-  pool.query(`UPDATE sub_company SET (name, state, address,login_id ,status) = ($1, $2, $3, $4, $5) WHERE id = $6`,
-    [req.body.name, req.body.state, req.body.address, req.body.login_id, req.body.status, req.body.id]).then((result) => {
+  pool.query(`UPDATE sub_company SET (name_display, state, address, login_id, status) = ($1, $2, $3, $4, $5) WHERE id = $6`,
+    [req.body.name_display, req.body.state, req.body.address, req.body.login_id, req.body.status, req.body.id]).then((result) => {
 
       return res.status(200).send({ success: true })
 
@@ -756,17 +812,202 @@ app.post('/createLead', async (req, res) => {
 
 })
 
+app.post('/createLead2', async (req, res) => {
+  console.log('createLead2')
+  req.body.created = new Date().getTime()
+  !req.body.sales_exec ? req.body.sales_exec = JSON.stringify([]) : req.body.sales_exec
+  // req.body.warranty == undefined || req.body.warranty == '' || req.body.warranty == null || req.body.warranty == false
+  if (!req.body.warranty) {
+    pool.query(`INSERT INTO nano_leads(created_date, customer_name,
+      customer_email, customer_phone, customer_city, customer_state, address, company_address,
+      saleexec_note, remark, ads_id, channel_id, sales_admin, services, issues, lattitude, longtitude, sales_coordinator, label_m, label_s, remark_json, status, 
+      sc_photo, created_by, race, gender, customer_title, verified, customer_unit, sc_video, sc_document, mkt_created) 
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, $16, $17, $18, $19, $20, $21, true, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31) RETURNING id`,
+      [req.body.created, req.body.name, req.body.email, req.body.phone, req.body.city, req.body.state, req.body.address, req.body.comp_address, req.body.sales_note,
+      req.body.remark, req.body.ads, req.body.channel, req.body.admin, req.body.services, req.body.issues, req.body.lattitude,
+      req.body.longitude, req.body.coordinator, req.body.label_m, req.body.label_s, req.body.remark_json, req.body.sc_photo, req.body.created_by,
+      req.body.race, req.body.gender, req.body.title, req.body.verified, req.body.customer_unit, req.body.sc_video, req.body.sc_document, req.body.mkt_created]).then((result) => {
+        lead_id = result.rows[0]['id']
+
+        pool.query(`SELECT user_name FROM nano_user WHERE uid = $1`, [req.body.created_by]).then((result) => {
+          let by = (result.rows.length > 0 ? result.rows[0]['user_name'] : null)
+          pool.query(`INSERT INTO nano_activity_log(lead_id, activity_time, activity_by, remark , activity_type) VALUES ($1, $2, $3, $4, $5)`,
+            [lead_id, req.body.created, req.body.created_by, 'Lead created by ' + (result.rows.length > 0 ? result.rows[0]['user_name'] : null), 'Lead']).then((result) => {
+
+              pool.query(`INSERT INTO nano_appointment(lead_id, created_time, appointment_status, assigned_to4 ) VALUES($1, $2, $3, $4)`, [lead_id, req.body.created, true, req.body.sales_exec]).then((result) => {
+                let from = new Date().setHours(0, 0, 0, 0)
+                let to = new Date().setHours(23, 59, 59, 59)
+                if (req.body.coordinator == null) {
+                  pool.query(`
+                 WITH coord AS(
+                  SELECT uid FROM nano_user WHERE user_role = 'Sales Coordinator' AND uid != 'jtCqpxB5FpRKDG0bvXWgEXLxNWG3' AND status = true
+                  ),
+                  counted AS (
+                  SELECT DISTINCT co.uid, coalesce(COUNT(nl.sales_coordinator),0) AS counter FROM coord co
+                  LEFT JOIN nano_leads nl ON co.uid = nl.sales_coordinator
+                  WHERE nl.created_date >= $2 AND nl.created_date <= $3
+                  GROUP BY co.uid  ORDER BY co.uid 
+                  ),
+                  ordered AS(
+                   SELECT co.uid, counter FROM coord co LEFT JOIN counted ct ON ct.uid = co.uid ORDER BY COALESCE(counter, -1) LIMIT 1
+                  )               
+                  UPDATE nano_leads SET sales_coordinator = (SELECT uid FROM ordered) WHERE id = $1 RETURNING sales_coordinator`, [lead_id, from, to]).then((result) => {
+
+                    let to_id = result.rows[0]['sales_coordinator']
+
+                    pool.query(`
+                    INSERT INTO nano_sc_notification (sn_created_date, lead_id, sn_remark, uid, to_id) 
+                    VALUES ($1, $2, $3, $4, $5)`, [req.body.created, lead_id, 'New Lead has been Created by ' + by, req.body.created_by, to_id]).then((result) => {
+
+                      return res.status(200).send({ data: lead_id, success: true })
+                    }).catch((error) => {
+                      console.log(error)
+                      return res.status(800).send({ success: false })
+                    })
+
+                  }).catch((error) => {
+                    console.log(error)
+                    return res.status(800).send({ success: false })
+                  })
+                } else {
+                  return res.status(200).send({ success: true })
+                }
+
+
+              }).catch((error) => {
+                console.log(error)
+                return res.status(800).send({ success: false })
+              })
+
+
+            }).catch((error) => {
+              console.log(error)
+              return res.status(800).send({ success: false })
+            })
+
+        }).catch((error) => {
+          console.log(error)
+          return res.status(800).send({ success: false })
+        })
+
+
+
+      }).catch((error) => {
+        console.log(error)
+        return res.status(800).send({ success: false })
+      })
+  } else {
+    pool.query(`INSERT INTO nano_leads(created_date, customer_name,
+      customer_email, customer_phone, customer_city, customer_state, address, company_address,
+      saleexec_note, remark, ads_id, channel_id, sales_admin, services, issues, lattitude, longtitude,
+       sales_coordinator, label_m, label_s, remark_json, status, sc_photo, created_by, race, gender, customer_title,verified, customer_unit, sc_video, sc_document, mkt_created) 
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, $16, $17, $18, $19, $20, $21, true, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31) RETURNING id`,
+      [req.body.created, req.body.name, req.body.email, req.body.phone, req.body.city, req.body.state, req.body.address, req.body.comp_address, req.body.sales_note,
+      req.body.remark, req.body.ads, req.body.channel, req.body.admin, req.body.services, req.body.issues, req.body.lattitude,
+      req.body.longitude, req.body.coordinator, req.body.label_m, req.body.label_s, req.body.remark_json, req.body.sc_photo, req.body.created_by,
+      req.body.race, req.body.gender, req.body.title, req.body.verified, req.body.customer_unit, req.body.sc_video, req.body.sc_document, req.body.mkt_created]).then((result) => {
+        console.log(req.body.created_by);
+        lead_id = result.rows[0]['id']
+        pool.query(`SELECT user_name FROM nano_user WHERE uid = $1`, [req.body.created_by]).then((result) => {
+
+          pool.query(`INSERT INTO nano_activity_log(lead_id, activity_time, activity_by, remark , activity_type) VALUES ($1, $2, $3, $4, $5)`,
+            [req.body.old_lead, req.body.created, req.body.created_by, 'Warranty Form Submitted by Client', 'Warranty']).then((result) => {
+
+              pool.query(`INSERT INTO nano_activity_log(lead_id, activity_time, activity_by, remark , activity_type) VALUES ($1, $2, $3, $4, $5)`,
+                [lead_id, req.body.created, req.body.created_by, 'Warranty Lead Created', 'Lead']).then((result) => {
+                  pool.query(`INSERT INTO nano_appointment(lead_id, created_time, assigned_to4) VALUES($1, $2, $3)`, [lead_id, req.body.created, req.body.sales_exec]).then((result) => {
+
+                    pool.query(`INSERT INTO nano_warranty(remark, created_date, linked_lead, faulty_area) VALUES($1, $2, $3, $4) RETURNING id
+                   `, [req.body.warranty_remark, req.body.created, req.body.old_lead, req.body.faulty_area]).then((result) => {
+                      warranty_id = result.rows[0]['id']
+                      let from = new Date().setHours(0, 0, 0, 0)
+                      let to = new Date().setHours(23, 59, 59, 59)
+                      if (req.body.sales_coordinator == null) {
+                        pool.query(`
+                   WITH coord AS(
+                    SELECT uid FROM nano_user WHERE user_role = 'Sales Coordinator' AND uid != 'jtCqpxB5FpRKDG0bvXWgEXLxNWG3' AND status = true
+                    ),            
+                    counted AS (
+                    SELECT DISTINCT co.uid, coalesce(COUNT(nl.sales_coordinator),0) AS counter FROM coord co
+                    LEFT JOIN nano_leads nl ON co.uid = nl.sales_coordinator
+                    WHERE nl.created_date >= $2 AND nl.created_date <= $3
+                    GROUP BY co.uid  ORDER BY co.uid 
+                    ),
+                    ordered AS(
+                     SELECT co.uid, counter FROM coord co LEFT JOIN counted ct ON ct.uid = co.uid ORDER BY COALESCE(counter, -1) LIMIT 1
+                    )               
+                    UPDATE nano_leads SET sales_coordinator = (SELECT uid FROM ordered), warranty_id = $4 WHERE id = $1`, [lead_id, from, to, warranty_id]).then((result) => {
+
+                          // return res.status(200).send({ data: lead_id, success: true })
+                          let to_id = result.rows[0]['sales_coordinator']
+
+                          pool.query(`
+                          INSERT INTO nano_sc_notification (sn_created_date, lead_id, sn_remark, uid, to_id) 
+                          VALUES ($1, $2, $3, $4, $5)`, [req.body.created, lead_id, 'New Lead has been Created by ' + by, req.body.created_by, to_id]).then((result) => {
+
+                            return res.status(200).send({ data: lead_id, success: true })
+                          }).catch((error) => {
+                            console.log(error)
+                            return res.status(800).send({ success: false })
+                          })
+
+
+                        }).catch((error) => {
+                          console.log(error)
+                          return res.status(800).send({ success: false })
+                        })
+                      } else {
+                        return res.status(200).send({ success: true })
+                      }
+                    }).catch((error) => {
+                      console.log(error)
+                      return res.status(800).send({ success: false })
+                    })
+
+                  }).catch((error) => {
+                    console.log(error)
+                    return res.status(800).send({ success: false })
+                  })
+
+                }).catch((error) => {
+                  console.log(error)
+                  return res.status(800).send({ success: false })
+                })
+
+
+
+
+            }).catch((error) => {
+              console.log(error)
+              return res.status(800).send({ success: false })
+            })
+
+        }).catch((error) => {
+          console.log(error)
+          return res.status(800).send({ success: false })
+        })
+
+
+
+      }).catch((error) => {
+        console.log(error)
+        return res.status(800).send({ success: false })
+      })
+  }
+
+
+})
+
 app.post('/getLeadDetail', (req, res) => {
   console.log('getLeadDetail');
 
-  pool.query(`  SELECT (SELECT SUM(npl.total) FROM nano_payment_log npl 
+  pool.query(`SELECT (SELECT SUM(npl.total) FROM nano_payment_log npl 
   LEFT JOIN nano_sales ns ON npl.sales_id = ns.id 
   LEFT JOIN nano_appointment na2 ON ns.appointment_id = na2.id 
   WHERE na2.lead_id = $1 
   GROUP BY ns.id Limit 1) AS total_price, nls.sales_status, nl.sc_photo AS sc_photo, nl.sc_video AS sc_video,nl.mkt_video, nl.mkt_photo,  nl.mkt_inspect, nl.mkt_install, nl.mkt_inspect_log, nl.mkt_install_log, nl.sc_document AS sc_document, nl.pc_document, nls.assigned_worker, nls.subcon_choice, nls.finance_check, nls.finance_remark,
- nl.id AS lead_id,  nla.name AS label_m, nla.colour AS label_m_colour,nla2.name
- AS label_s, nla2.colour AS label_s_colour, nap.checkin 
- AS checkin_time, nap.checkin_img, nap.checkin_address, nap.appointment_status, nap.bypass, nl.gender, nl.race, nl.warranty_id, 
+ nl.id AS lead_id, nla.id AS label_m_id,  nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id,nla2.name AS label_s, nla2.colour AS label_s_colour, nap.checkin AS checkin_time, nap.checkin_img,
+  nap.checkin_address, nap.appointment_status, nap.bypass, nl.gender, nl.race, nl.warranty_id, nsc.id AS com_id, 
    nap.appointment_time, nap.kiv,  
  (SELECT JSON_AGG(b.user_name) FROM nano_appointment jna LEFT JOIN nano_user b 
 ON b.uid = ANY(SELECT json_array_elements_text(jna.assigned_to4))
@@ -785,11 +1026,20 @@ FROM nano_sub_complaint WHERE lead_id = $1) as complaint_lists,
                    'check_address', nc.check_address, 'check_remark', nc.checK_remark, 'check-status', nc.check_status, 
                     'event_time', nc.event_time, 'complete_status', nc.complete_status)) FROM nano_check nc 
   WHERE nap.id = nc.appointment_id AND nc.status = true) as check_details
-   FROM nano_leads nl LEFT JOIN nano_user nu1 ON nl.created_by = nu1.uid 
- LEFT JOIN nano_user nu3 ON nl.sales_coordinator = nu3.uid LEFT JOIN nano_appointment nap 
-   ON nap.lead_id = nl.id LEFT JOIN nano_label nla ON nl.label_m = nla.id 
- LEFT JOIN nano_label nla2 
-   ON nl.label_s = nla2.id LEFT JOIN nano_sales nls ON nap.id = nls.appointment_id
+  FROM nano_leads nl 
+  LEFT JOIN nano_user nu1 ON nl.created_by = nu1.uid 
+  LEFT JOIN nano_user nu3 ON nl.sales_coordinator = nu3.uid 
+  LEFT JOIN nano_appointment nap ON nap.lead_id = nl.id 
+  LEFT JOIN nano_label nla ON nl.label_m = nla.id 
+  LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id 
+  LEFT JOIN nano_sales nls ON nap.id = nls.appointment_id
+  LEFT JOIN LATERAL (
+    SELECT *
+    FROM nano_sub_complaint nsc
+    WHERE nsc.lead_id = nl.id
+    ORDER BY nsc.created_date
+    LIMIT 1
+) nsc ON true
    WHERE nl.id = $1`, [req.body.lead_id]).then((result) => {
 
     pool.query(`SELECT CASE WHEN COUNT(*) = 0 THEN false
@@ -818,36 +1068,32 @@ FROM nano_sub_complaint WHERE lead_id = $1) as complaint_lists,
 app.post('/getLeadDetailPM', (req, res) => {
   console.log('getLeadDetailPM');
 
-  pool.query(`  SELECT (SELECT SUM(npl.total) FROM nano_payment_log npl 
-  LEFT JOIN nano_sales ns ON npl.sales_id = ns.id 
-  LEFT JOIN nano_appointment na2 ON ns.appointment_id = na2.id 
-  WHERE na2.lead_id = $1 
-  GROUP BY ns.id Limit 1) AS total_price, nls.sales_status, nl.sc_photo AS sc_photo, nl.sc_video AS sc_video,nl.mkt_video, nl.mkt_photo,  nl.mkt_inspect, nl.mkt_install, nl.mkt_inspect_log, nl.mkt_install_log, nl.sc_document AS sc_document, nl.pc_document, nls.assigned_worker, nls.subcon_choice, nls.finance_check, nls.finance_remark,
- nl.id AS lead_id,  nla.name AS label_m, nla.colour AS label_m_colour,nla2.name
- AS label_s, nla2.colour AS label_s_colour, nap.checkin 
- AS checkin_time, nap.checkin_img, nap.checkin_address, nap.appointment_status, nap.bypass, nl.gender, nl.race, nl.warranty_id, 
-   nap.appointment_time, nap.kiv,  
- (SELECT JSON_AGG(b.user_name) FROM nano_appointment jna LEFT JOIN nano_user b 
-ON b.uid = ANY(SELECT json_array_elements_text(jna.assigned_to4))
- WHERE jna.id = nap.id) as assigned_to4, nl.created_date, nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_signature,
- nl.customer_state, nls.subcon_state,
-   nl.address, nl.customer_unit, nl.customer_title, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues, nl.label_photo, nl.label_video,
- nl.status, nl.lattitude, nl.longtitude, nl.ads_id AS ads, nl.channel_id AS channel, nls.id  AS sales_id, nls.status AS whole_status,
-   nls.payment_status , nap.id AS appointment_id,nl.remark_json, nu1.user_name AS sales_admin, nls.final_reject_remark, nls.final_reject_title, nls.final_reject_area,
- nu3.user_name AS sales_coordinator,
- (SELECT JSONB_AGG(JSONB_BUILD_OBJECT('created_date', created_date, 'complaint_tb_id', id, 'complaint_remark', complaint_remark,
- 'complaint_status', complaint_status,
-'complaint_image', complaint_image, 'complaint_video' , complaint_video, 'complaint_reject_remark', reject_remark, 'sub_complaint_details', sub_complaint_details))
-FROM nano_sub_complaint WHERE lead_id = $1) as complaint_lists,
- (SELECT JSONB_AGG(JSONB_BUILD_OBJECT('check_time', sci.checkin_time, 'check_img', sci.checkin_img, 
-                   'check_address', sci.checkin_address)) FROM sub_check_in sci 
-  WHERE nls.id = sci.sales_id) as check_details
-   FROM nano_leads nl LEFT JOIN nano_user nu1 ON nl.created_by = nu1.uid 
- LEFT JOIN nano_user nu3 ON nl.sales_coordinator = nu3.uid LEFT JOIN nano_appointment nap 
-   ON nap.lead_id = nl.id LEFT JOIN nano_label nla ON nl.label_m = nla.id 
- LEFT JOIN nano_label nla2 
-   ON nl.label_s = nla2.id LEFT JOIN nano_sales nls ON nap.id = nls.appointment_id
-   WHERE nl.id = $1`, [req.body.lead_id]).then((result) => {
+  pool.query(`SELECT 
+  (SELECT SUM(npl.total) FROM nano_payment_log npl LEFT JOIN nano_sales ns ON npl.sales_id = ns.id LEFT JOIN nano_appointment na2 ON ns.appointment_id = na2.id WHERE na2.lead_id = $1 GROUP BY ns.id Limit 1) AS total_price, 
+  nls.sales_status, nl.sc_photo AS sc_photo, nl.sc_video AS sc_video, nl.mkt_video, nl.mkt_photo,  
+  nl.mkt_inspect, nl.mkt_install, nl.mkt_inspect_log, nl.mkt_install_log, nl.sc_document AS sc_document, nl.pc_document, 
+  nls.assigned_worker, nls.subcon_choice, nls.finance_check, nls.finance_remark, nl.id AS lead_id, 
+  nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, 
+  nap.checkin AS checkin_time, nap.checkin_img, nap.checkin_address, nap.appointment_status, nap.bypass, nl.gender, nl.race, nl.warranty_id, 
+  nap.appointment_time, nap.kiv, (SELECT JSON_AGG(b.user_name) FROM nano_appointment jna LEFT JOIN nano_user b ON b.uid = ANY(SELECT json_array_elements_text(jna.assigned_to4)) WHERE jna.id = nap.id) as assigned_to4, 
+  nl.created_date, nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_signature, nl.customer_state, nls.subcon_state,
+  nl.address, nl.customer_unit, nl.customer_title, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues, nl.label_photo, nl.label_video,
+  nl.status, nl.lattitude, nl.longtitude, nl.ads_id AS ads, nl.channel_id AS channel, nls.id AS sales_id, nls.status AS whole_status, nls.payment_status, 
+  nap.id AS appointment_id, nl.remark_json, nu1.user_name AS sales_admin, nls.final_reject_remark, nls.final_reject_title, nls.final_reject_area, nu3.user_name AS sales_coordinator,
+  (SELECT JSONB_AGG(JSONB_BUILD_OBJECT('created_date', created_date, 'complaint_tb_id', id, 'complaint_remark', complaint_remark, 'complaint_status', complaint_status,
+   'complaint_image', complaint_image, 'complaint_video', complaint_video, 'complaint_reject_remark', reject_remark, 'sub_complaint_details', sub_complaint_details))
+   FROM nano_sub_complaint WHERE lead_id = $1) as complaint_lists,
+  (SELECT JSONB_AGG(JSONB_BUILD_OBJECT('checkid', sci.id, 'check_time', sci.checkin_time, 'sales_id', sci.sales_id, 'check_img', sci.checkin_img, 
+   'check_address', sci.checkin_address, 'check_out', sci.check_out, 'check_useruid', sci.check_useruid, 'check_user_name', (SELECT user_name FROM sub_user WHERE uid = sci.check_useruid))ORDER BY sci.id) 
+   FROM sub_check_in sci WHERE nls.id = sci.sales_id) as check_details
+FROM nano_leads nl 
+LEFT JOIN nano_user nu1 ON nl.created_by = nu1.uid 
+LEFT JOIN nano_user nu3 ON nl.sales_coordinator = nu3.uid 
+LEFT JOIN nano_appointment nap ON nap.lead_id = nl.id 
+LEFT JOIN nano_label nla ON nl.label_m = nla.id 
+LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id 
+LEFT JOIN nano_sales nls ON nap.id = nls.appointment_id
+WHERE nl.id = $1`, [req.body.lead_id]).then((result) => {
 
     pool.query(`SELECT CASE WHEN COUNT(*) = 0 THEN false
       ELSE true
@@ -953,6 +1199,21 @@ app.post('/updateLeadDetail', (req, res) => {
 // customer name, phone, address, project manager remark, task_place, service  //
 // *dont spoil                                                                 //
 /////////////////////////////////////////////////////////////////////////////////
+
+app.post('/updatePaymentEmailPhoto', (req, res) => {
+  console.log('updatePaymentEmailPhoto');
+  pool.query(`UPDATE nano_payment_log SET email_approval = $1 WHERE id =  $2`,
+    [req.body.email_approval, req.body.id]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ success: false })
+    })
+
+})
+
 app.post('/updateLeadScPhoto', (req, res) => {
   console.log('updateLeadScPhoto');
   pool.query(`UPDATE nano_leads SET 
@@ -1172,7 +1433,7 @@ app.get('/getAcPaymentLog', (req, res) => {
     }
 
     client.query(`
-        SELECT nl.id AS lead_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.created_date, nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state,
+        SELECT nl.id AS lead_id, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.created_date, nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state,
         nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues,nl.status AS lead_status,nl.ads_id, nl.channel_id, nls.payment_status, nls.total AS payment_total, nls.sales_status,
         (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
         (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, nls.subcon_state,
@@ -1208,7 +1469,7 @@ app.get('/getScPaymentLog', (req, res) => {
 
 
     client.query(`
-  SELECT nl.id AS lead_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.created_date, nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state,
+  SELECT nl.id AS lead_id, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.created_date, nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state,
   nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues,nl.status AS lead_status,nl.ads_id, nl.channel_id, nls.payment_status, nls.total AS payment_total, nls.sales_status,
   (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
   (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, nls.subcon_state,
@@ -1263,10 +1524,33 @@ app.post('/updateApproval', (req, res) => {
         console.log(error)
         return res.status(800).send({ success: false })
       })
-  } else {
+  } else if (req.body.role == 'sc') {
 
     pool.query(`UPDATE nano_payment_log SET (sc_approval, remark_sc_reject, remark_ac_reject) = ($1,$2, $4) WHERE id =  $3`,
       [req.body.approval, req.body.remark_sc_reject, req.body.id, req.body.remark_ac_reject]).then((result) => {
+
+        return res.status(200).send({ success: true })
+
+      }).catch((error) => {
+        console.log(error)
+        return res.status(800).send({ success: false })
+      })
+  } else if (req.body.role == 'sp') {
+
+    pool.query(`UPDATE nano_payment_log SET (sp_paul_approve, sp_approval_log) = ($1,$2) WHERE id = $3`,
+      [req.body.sp_paul_approve, req.body.sp_approval_log, req.body.id]).then((result) => {
+
+        return res.status(200).send({ success: true })
+
+      }).catch((error) => {
+        console.log(error)
+        return res.status(800).send({ success: false })
+      })
+  } else if (req.body.role == 'splead') {
+    // const sp_leader_name = req.body.sp_leader_name || null;
+
+    pool.query(`UPDATE nano_payment_log SET (sp_leader_approve, sp_approval_log, sp_leader_name) = ($1,$2, $4) WHERE id = $3`,
+      [req.body.sp_leader_approve, req.body.sp_approval_log, req.body.id, req.body.sp_leader_name]).then((result) => {
 
         return res.status(200).send({ success: true })
 
@@ -1278,6 +1562,8 @@ app.post('/updateApproval', (req, res) => {
 
 
 })
+
+
 //
 app.post('/uploadCustomQuotation', (req, res) => {
   console.log('uploadCustomQuotation');
@@ -1316,6 +1602,47 @@ app.post('/updateSubLabel', (req, res) => {
 
   pool.query(`UPDATE nano_leads SET label_s = $1 WHERE id =  $2`,
     [req.body.label_s, req.body.id])
+    .then((result) => {
+      req.body.activity_time = new Date().getTime()
+      pool.query(`SELECT user_name FROM nano_user WHERE uid = $1`,
+        [req.body.uid])
+        .then((result) => {
+          pool.query(`INSERT INTO nano_activity_log (lead_id, activity_time, activity_by, remark, activity_type) VALUES ($1, $2, $3, $4, $5)`,
+            [req.body.id, req.body.activity_time, req.body.uid, 'Sub Label Updated By ' + (result.rows.length > 0 ? result.rows[0]['user_name'] : null), 'Label'])
+
+            // pool.query(`
+            //           INSERT INTO nano_activity_log (lead_id, appointment_id, activity_time, activity_by, remark, activity_type) 
+            //           VALUES((SELECT nl.id FROM nano_leads nl LEFT JOIN nano_appointment na ON nl.id = na.lead_id WHERE na.id = $1), 
+            //           $1, $2, $3, $4, $5)
+            //         `,
+            //       [req.body.appointment_id, req.body.created_date, req.body.uid, 'Appointment Checked In By ' + by, 'Appointment'])
+            .then((result) => {
+
+              return res.status(200).send({ success: true })
+
+            }).catch((error) => {
+              console.log(error)
+              return res.status(800).send({ success: false })
+            })
+
+
+        }).catch((error) => {
+          console.log(error)
+          return res.status(800).send({ success: false })
+        })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ success: false })
+    })
+
+})
+
+app.post('/updateSubLabel2', (req, res) => {
+  console.log('updateSubLabel2');
+
+  pool.query(`UPDATE nano_leads SET (label_s, label_m) = ($1, $3) WHERE id =  $2`,
+    [req.body.label_s, req.body.id, req.body.label_m])
     .then((result) => {
       req.body.activity_time = new Date().getTime()
       pool.query(`SELECT user_name FROM nano_user WHERE uid = $1`,
@@ -1693,7 +2020,7 @@ app.post('/updateLeadAppointmentforapp', (req, res) => {
 app.post('/searchLeadList', async (req, res) => {
   console.log('searchLeadList')
   pool.query(`WITH selected AS (
-    SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+    SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
       (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
       (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
       ELSE nl.created_date::bigint end) AS created_date,
@@ -1719,7 +2046,7 @@ app.post('/searchLeadList', async (req, res) => {
         FROM nano_leads nl LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id LEFT JOIN nano_user u1 ON nl.created_by = u1.uid LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
         LEFT JOIN nano_label nla ON nl.label_m = nla.id LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id LEFT JOIN 
         nano_sales nls ON nat.id = nls.appointment_id 
-      ) SELECT * FROM selected WHERE (customer_name LIKE $1 OR customer_phone LIKE $1 OR customer_city LIKE $1 OR customer_state LIKE $1 OR address LIKE $1) LIMIT 1500`, ['%' + req.body.keyword + '%']
+      ) SELECT * FROM selected WHERE (customer_name ILIKE $1 OR customer_phone ILIKE $1 OR customer_city ILIKE $1 OR customer_state ILIKE $1 OR address ILIKE $1) LIMIT 1500`, ['%' + req.body.keyword + '%']
   ).then((result) => {
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -1744,7 +2071,7 @@ app.get('/getLeadGroupByPhone', async (req, res) => {
 
 app.post('/searchLeadGroupByPhone', async (req, res) => {
   console.log('searchLeadGroupByPhone')
-  pool.query(`SELECT COUNT(*), customer_phone, MAX(customer_name) AS customer_name FROM nano_leads  WHERE (LOWER(customer_name) LIKE $1 OR customer_phone LIKE $1) GROUP BY customer_phone ORDER BY MAX(created_date) DESC LIMIT 1500`, ['%' + req.body.keyword + '%']).then((result) => {
+  pool.query(`SELECT COUNT(*), customer_phone, MAX(customer_name) AS customer_name FROM nano_leads  WHERE (LOWER(customer_name) ILIKE $1 OR customer_phone ILIKE $1) GROUP BY customer_phone ORDER BY MAX(created_date) DESC LIMIT 1500`, ['%' + req.body.keyword + '%']).then((result) => {
     return res.status(200).send({ data: result.rows, success: true })
 
   }).catch((error) => {
@@ -1757,7 +2084,7 @@ app.post('/searchLeadGroupByPhone', async (req, res) => {
 app.post('/getLeadListByPhoneNumber', async (req, res) => {
   console.log('getLeadListByPhoneNumber')
   pool.query(`WITH selected AS (
-    SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+    SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
       (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
       (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
       ELSE nl.created_date::bigint end) AS created_date,
@@ -1793,30 +2120,16 @@ app.post('/getLeadListByPhoneNumber', async (req, res) => {
 })
 
 
-// WITH selected AS (
-//   SELECT nl.id AS lead_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
-//     (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
-//     (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
-//     ELSE nl.created_date::bigint end) AS created_date,
-//     row_number() over (partition by nl.customer_phone ORDER BY nl.created_date DESC) as phone_row_number,
-//     row_number() over (partition by nl.address ORDER BY nl.created_date DESC) as address_row_number,
-//     nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state, nl.verified,
-//       nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues,nl.status AS lead_status,nl.ads_id, nl.channel_id, nls.payment_status, nls.total AS payment_total, nls.sales_status, nat.assigned_to4, nat.checkin,
-//       (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
-//       (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, nls.subcon_state, nls.finance_check, nls.finance_remark, 
-//       (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
-//       nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid, nat.assigned_to4 AS sales_exec
-//       FROM nano_leads nl LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id LEFT JOIN nano_user u1 ON nl.created_by = u1.uid LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
-//       LEFT JOIN nano_label nla ON nl.label_m = nla.id LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id LEFT JOIN nano_appointment nap ON nap.lead_id = nl.id LEFT JOIN 
-//       nano_sales nls ON nap.id = nls.appointment_id
-//     ) SELECT * FROM selected WHERE phone_row_number = 1 AND address_row_number = 1 AND verified = true
-
 app.get('/getFinanceList', async (req, res) => {
   console.log('getLeadList')
   pool.query(`SELECT DISTINCT ON (nano_leads.id) nano_leads.*, nano_sales.*, 
   substring(subcon_service_form.serviceform from '/nano/([^/]+)-') AS service_form_num,
-  substring(nano_sales_order.orderform from '/nano/([^/]+)-') AS sof_num
+  substring(nano_sales_order.orderform from '/nano/([^/]+)-') AS sof_num,
+  (SELECT JSON_AGG(b.user_name) FROM nano_appointment jna LEFT JOIN nano_user b 
+ON b.uid = ANY(SELECT json_array_elements_text(jna.assigned_to4))
+ WHERE jna.id = nap.id) as assigned_to4
   FROM nano_leads 
+  LEFT JOIN nano_appointment nap ON nap.lead_id = nano_leads.id 
   LEFT JOIN nano_sales ON nano_sales.lead_id = nano_leads.id 
   LEFT JOIN subcon_service_form ON subcon_service_form.lead_id = nano_leads.id 
   LEFT JOIN nano_sales_order ON nano_sales_order.lead_id = nano_leads.id 
@@ -1830,6 +2143,1022 @@ app.get('/getFinanceList', async (req, res) => {
   })
 })
 
+// app.get('/getAllLeadList', async (req, res) => {
+//   console.log('getAllLeadList')
+
+//   pool.connect((err, client, release) => {
+//     if (err) {
+//       release()
+//       return res.status(200).send({ success: false })
+//     }
+
+//     client.query(`WITH selected AS (
+//             SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+//               nc.no AS check_details,
+//               (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
+//               (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
+//               ELSE nl.created_date::bigint end) AS created_date,
+//               (SELECT created_date FROM nano_sales WHERE appointment_id = nat.id LIMIT 1) AS appoint_date,
+//             CASE 
+//             WHEN nl.customer_phone IS NULL THEN 0
+//             ELSE  row_number() over (partition by nl.customer_phone ORDER BY nl.created_date ASC NULLS LAST)
+//             END as phone_row_number,
+//               nls.status AS whole_status,
+//               nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state, nl.verified,
+//                 nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues,nl.status AS lead_status,nl.ads_id, nl.channel_id, nat.appointment_status, nls.payment_status, 
+//                 nls.total AS payment_total, nls.sales_status, nat.assigned_to4, nat.assigned_to, nat.checkin, nat.kiv,
+//                 (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, 
+//                 (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
+//                 (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, 
+//                 nls.subcon_state, nls.finance_check, nls.finance_remark, 
+//                 CASE
+//                 WHEN (nls.gen_quotation::TEXT = '[]' OR nls.gen_quotation IS NULL) AND (nls.custom_quotation::TEXT = '[]' OR nls.custom_quotation IS NULL) THEN false
+//                 else true
+//                 END as got_quotation,
+//                 (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
+//                 nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
+//                 FROM nano_leads nl LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id LEFT JOIN nano_user u1 ON nl.created_by = u1.uid LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
+//                 LEFT JOIN nano_label nla ON nl.label_m = nla.id LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id LEFT JOIN 
+//                 nano_sales nls ON nat.id = nls.appointment_id LEFT JOIN nano_check nc ON  nc.appointment_id = nat.id ORDER BY lead_id asc
+//               ) SELECT DISTINCT ON (s.lead_id) s.*, (SELECT created_date AS sof_latest_created_date FROM nano_sales_order nso WHERE nso.lead_id = s.lead_id ORDER BY nso.created_date LIMIT 1)
+//               FROM selected s
+//               ORDER BY s.lead_id`
+//     ).then((result) => {
+//       release()
+//       return res.status(200).send({ data: result.rows, success: true })
+
+//     }).catch((error) => {
+//       release()
+//       console.log(error)
+//       return res.status(800).send({ success: false })
+//     })
+
+//   })
+
+// })
+
+app.get('/getOverview', async (req, res) => {
+  console.log('getOverview')
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release()
+      return res.status(200).send({ success: false })
+    }
+
+    const currentDate = new Date();
+
+    // Current Month
+    const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1).getTime();
+    const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0, 23, 59, 59).getTime();
+
+    // Last Month
+    const startOfLastMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1).getTime();
+    const endOfLastMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 0, 23, 59, 59).getTime();
+
+    // This Year
+    const startOfYear = new Date(currentDate.getFullYear(), 0, 1).getTime();
+    const endOfYear = new Date(currentDate.getFullYear(), 11, 31, 23, 59, 59).getTime();
+
+    // Last Year
+    const startOfLastYear = new Date(currentDate.getFullYear() - 1, 0, 1).getTime();
+    const endOfLastYear = new Date(currentDate.getFullYear() - 1, 11, 31, 23, 59, 59).getTime();
+
+    const query = `SELECT 
+    COUNT(*) AS all,
+    COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 THEN 1 ELSE NULL END) AS this_month,
+    COUNT(CASE WHEN nl.created_date BETWEEN $3 AND $4 THEN 1 ELSE NULL END) AS last_month,
+    COUNT(CASE WHEN nl.created_date BETWEEN $5 AND $6 THEN 1 ELSE NULL END) AS this_year,
+    COUNT(CASE WHEN nl.created_date BETWEEN $7 AND $8 THEN 1 ELSE NULL END) AS last_year,
+    COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s = 2 THEN 1 ELSE NULL END) AS follow_up,
+    COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s = 11 THEN 1 ELSE NULL END) AS attending,
+    COUNT(CASE WHEN ns.gen_quotation IS NOT NULL
+      AND json_array_length(ns.gen_quotation) > 0
+      AND (
+        SELECT (json_array_elements(ns.gen_quotation)->>'date')::BIGINT
+        FROM json_array_elements(ns.gen_quotation)
+        ORDER BY (json_array_elements(ns.gen_quotation)->>'date')::BIGINT DESC
+        LIMIT 1
+      ) BETWEEN CAST($1 AS BIGINT) AND CAST($2 AS BIGINT) 
+      THEN 1 ELSE NULL END) AS quotation,
+    COUNT(DISTINCT CASE WHEN nso.lead_id = nl.id AND CAST(nso.created_date AS BIGINT) BETWEEN CAST($1 AS BIGINT) AND CAST($2 AS BIGINT) THEN nso.created_date ELSE NULL END) AS sales_close
+  FROM nano_leads nl
+  LEFT JOIN (
+    SELECT lead_id, MAX(CAST(created_date AS BIGINT)) AS created_date
+    FROM nano_sales_order
+    GROUP BY lead_id
+  ) nso ON nso.lead_id = nl.id
+  LEFT JOIN nano_sales ns ON ns.lead_id = nl.id  
+  `;
+
+    client.query(query, [
+      startOfMonth, endOfMonth,      // Current Month
+      startOfLastMonth, endOfLastMonth, // Last Month
+      startOfYear, endOfYear,       // This Year
+      startOfLastYear, endOfLastYear // Last Year
+    ]).then((result) => {
+      release()
+      return res.status(200).send({ data: result.rows, success: true })
+    }).catch((error) => {
+      release()
+      console.log(error)
+      return res.status(800).send({ success: false })
+    })
+  })
+})
+
+app.post('/getOverview2', async (req, res) => {
+  console.log('getOverview2');
+
+  const { selectyear, startdate, enddate } = req.body;
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(200).send({ success: false });
+    }
+
+    //   COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 
+    //     AND nl.label_s NOT IN (2, 11, 80, 81) 
+    //     AND nl.label_s NOT IN (SELECT id FROM nano_label WHERE category = 'Unable To Do')
+    //     AND nl.label_s NOT IN (SELECT id FROM nano_label WHERE category = 'Follow Up') 
+    // THEN 1 ELSE NULL END) AS other,
+    const query = `
+      SELECT 
+        COUNT(*) AS all,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 THEN 1 ELSE NULL END) AS selected_period,
+        COUNT(CASE WHEN nl.created_date BETWEEN $3 AND $4 THEN 1 ELSE NULL END) AS last_period,
+        COUNT(CASE WHEN nl.created_date BETWEEN $5 AND $6 THEN 1 ELSE NULL END) AS this_year,
+        COUNT(CASE WHEN nl.created_date BETWEEN $7 AND $8 THEN 1 ELSE NULL END) AS last_year,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s = 2 THEN 1 ELSE NULL END) AS to_follow,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s IN (11, 46) THEN 1 ELSE NULL END) AS attending,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s IN (80, 81) THEN 1 ELSE NULL END) AS cancel_reschedule,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s IN (SELECT id FROM nano_label 
+          WHERE category = 'Unable To Do') 
+        THEN 1 ELSE NULL END) AS unable,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s IN (SELECT id FROM nano_label WHERE category = 'Follow Up') 
+        THEN 1 ELSE NULL END) AS followed,
+        COUNT(DISTINCT CASE WHEN nso.lead_id = nl.id AND CAST(nso.created_date AS BIGINT) BETWEEN CAST($1 AS BIGINT) AND CAST($2 AS BIGINT) THEN nso.created_date ELSE NULL END) AS sales_close,
+
+    
+        (COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 
+            AND nl.label_s NOT IN (2, 11, 46, 80, 81) 
+            AND nl.label_s NOT IN (SELECT id FROM nano_label WHERE category = 'Unable To Do')
+            AND nl.label_s NOT IN (SELECT id FROM nano_label WHERE category = 'Follow Up') 
+        THEN 1 ELSE NULL END) - 
+        COUNT(DISTINCT CASE WHEN nso.lead_id = nl.id AND CAST(nso.created_date AS BIGINT) BETWEEN CAST($1 AS BIGINT) AND CAST($2 AS BIGINT) THEN nso.created_date ELSE NULL END)
+        ) AS adjusted_other
+
+      FROM nano_leads nl
+      LEFT JOIN (
+        SELECT lead_id, MAX(CAST(created_date AS BIGINT)) AS created_date
+        FROM nano_sales_order
+        GROUP BY lead_id
+      ) nso ON nso.lead_id = nl.id
+      LEFT JOIN nano_sales ns ON ns.lead_id = nl.id  
+    `;
+
+    // Calculate the date ranges
+    const startOfSelectedPeriod = parseInt(startdate); // Passed start date as timestamp
+    const endOfSelectedPeriod = parseInt(enddate); // Passed end date as timestamp
+    const startOfLastPeriod = new Date(new Date(startOfSelectedPeriod).setMonth(new Date(startOfSelectedPeriod).getMonth() - 1)).getTime();
+    const endOfLastPeriod = new Date(new Date(endOfSelectedPeriod).setMonth(new Date(endOfSelectedPeriod).getMonth() - 1)).getTime();
+    const startOfYear = new Date(selectyear, 0, 1).getTime();
+    const endOfYear = new Date(selectyear, 11, 31, 23, 59, 59).getTime();
+    const startOfLastYear = new Date(selectyear - 1, 0, 1).getTime();
+    const endOfLastYear = new Date(selectyear - 1, 11, 31, 23, 59, 59).getTime();
+
+    // Execute the query with the dynamic parameters
+    client
+      .query(query, [
+        startOfSelectedPeriod, endOfSelectedPeriod, // Selected Period
+        startOfLastPeriod, endOfLastPeriod,         // Last Period
+        startOfYear, endOfYear,                     // This Year
+        startOfLastYear, endOfLastYear              // Last Year
+      ])
+      .then((result) => {
+        release();
+        return res.status(200).send({ data: result.rows, success: true });
+      })
+      .catch((error) => {
+        release();
+        console.log(error);
+        return res.status(800).send({ success: false });
+      });
+  });
+});
+
+app.post('/getOverviewSc', async (req, res) => {
+  console.log('getOverviewSc');
+
+  const { selectyear, startdate, enddate, salesco } = req.body;
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(200).send({ success: false });
+    }
+
+    const query = `
+      SELECT 
+        COUNT(*) AS all,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 THEN 1 ELSE NULL END) AS selected_period,
+        COUNT(CASE WHEN nl.created_date BETWEEN $3 AND $4 THEN 1 ELSE NULL END) AS last_period,
+        COUNT(CASE WHEN nl.created_date BETWEEN $5 AND $6 THEN 1 ELSE NULL END) AS this_year,
+        COUNT(CASE WHEN nl.created_date BETWEEN $7 AND $8 THEN 1 ELSE NULL END) AS last_year,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s = 2 THEN 1 ELSE NULL END) AS to_follow,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s IN (11, 46) THEN 1 ELSE NULL END) AS attending,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s IN (80, 81) THEN 1 ELSE NULL END) AS cancel_reschedule,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s IN (SELECT id FROM nano_label 
+          WHERE category = 'Unable To Do') 
+        THEN 1 ELSE NULL END) AS unable,
+        COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 AND nl.label_s IN (SELECT id FROM nano_label WHERE category = 'Follow Up') 
+        THEN 1 ELSE NULL END) AS followed,
+        COUNT(DISTINCT CASE WHEN nso.lead_id = nl.id AND CAST(nso.created_date AS BIGINT) BETWEEN CAST($1 AS BIGINT) AND CAST($2 AS BIGINT) THEN nso.created_date ELSE NULL END) AS sales_close,
+        
+        (COUNT(CASE WHEN nl.created_date BETWEEN $1 AND $2 
+            AND nl.label_s NOT IN (2, 11, 46, 80, 81) 
+            AND nl.label_s NOT IN (SELECT id FROM nano_label WHERE category = 'Unable To Do')
+            AND nl.label_s NOT IN (SELECT id FROM nano_label WHERE category = 'Follow Up') 
+        THEN 1 ELSE NULL END) - 
+        COUNT(DISTINCT CASE WHEN nso.lead_id = nl.id AND CAST(nso.created_date AS BIGINT) BETWEEN CAST($1 AS BIGINT) AND CAST($2 AS BIGINT) THEN nso.created_date ELSE NULL END)
+        ) AS adjusted_other
+
+      FROM nano_leads nl
+      LEFT JOIN (
+        SELECT lead_id, MAX(CAST(created_date AS BIGINT)) AS created_date
+        FROM nano_sales_order
+        GROUP BY lead_id
+      ) nso ON nso.lead_id = nl.id
+      LEFT JOIN nano_sales ns ON ns.lead_id = nl.id  
+      WHERE nl.sales_coordinator = $9
+    `;
+
+    // Calculate the date ranges
+    const startOfSelectedPeriod = parseInt(startdate); // Passed start date as timestamp
+    const endOfSelectedPeriod = parseInt(enddate); // Passed end date as timestamp
+    const startOfLastPeriod = new Date(new Date(startOfSelectedPeriod).setMonth(new Date(startOfSelectedPeriod).getMonth() - 1)).getTime();
+    const endOfLastPeriod = new Date(new Date(endOfSelectedPeriod).setMonth(new Date(endOfSelectedPeriod).getMonth() - 1)).getTime();
+    const startOfYear = new Date(selectyear, 0, 1).getTime();
+    const endOfYear = new Date(selectyear, 11, 31, 23, 59, 59).getTime();
+    const startOfLastYear = new Date(selectyear - 1, 0, 1).getTime();
+    const endOfLastYear = new Date(selectyear - 1, 11, 31, 23, 59, 59).getTime();
+
+    // Execute the query with the dynamic parameters
+    client
+      .query(query, [
+        startOfSelectedPeriod, endOfSelectedPeriod, // Selected Period
+        startOfLastPeriod, endOfLastPeriod,         // Last Period
+        startOfYear, endOfYear,                     // This Year
+        startOfLastYear, endOfLastYear,             // Last Year
+        salesco                                     // Sales Coordinator UID
+      ])
+      .then((result) => {
+        release();
+        return res.status(200).send({ data: result.rows, success: true });
+      })
+      .catch((error) => {
+        release();
+        console.log(error);
+        return res.status(500).send({ success: false });
+      });
+  });
+});
+
+app.post('/getOverviewSe', async (req, res) => {
+  console.log('getOverviewSe');
+
+  const { selectyear, startdate, enddate, salesex } = req.body;
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(200).send({ success: false });
+    }
+
+    const query = `
+      SELECT 
+        COUNT(*) AS all,
+        COUNT(CASE WHEN na.appointment_time BETWEEN $1 AND $2 THEN 1 ELSE NULL END) AS selected_period,
+        COUNT(CASE WHEN na.appointment_time BETWEEN $3 AND $4 THEN 1 ELSE NULL END) AS last_period,
+        COUNT(CASE WHEN na.appointment_time BETWEEN $5 AND $6 THEN 1 ELSE NULL END) AS this_year,
+        COUNT(CASE WHEN na.appointment_time BETWEEN $7 AND $8 THEN 1 ELSE NULL END) AS last_year,
+        COUNT(CASE WHEN na.appointment_time BETWEEN $1 AND $2 AND nl.label_s IN (11) THEN 1 ELSE NULL END) AS attending,
+        COUNT(CASE WHEN na.appointment_time BETWEEN $1 AND $2 AND nl.label_s IN (46) THEN 1 ELSE NULL END) AS attended,
+        COUNT(CASE WHEN na.appointment_time BETWEEN $1 AND $2 AND nl.label_s IN (80, 81) THEN 1 ELSE NULL END) AS cancel_reschedule,
+        COUNT(CASE WHEN na.appointment_time BETWEEN $1 AND $2 AND nl.label_s IN (SELECT id FROM nano_label 
+          WHERE category = 'Unable To Do') 
+        THEN 1 ELSE NULL END) AS unable,
+        COUNT(DISTINCT CASE WHEN nso.lead_id = nl.id AND CAST(nso.created_date AS BIGINT) BETWEEN CAST($1 AS BIGINT) AND CAST($2 AS BIGINT) THEN nso.created_date ELSE NULL END) AS sales_close,
+        
+        (COUNT(CASE WHEN na.appointment_time BETWEEN $1 AND $2 
+            AND nl.label_s NOT IN (11, 46, 80, 81) 
+            AND nl.label_s NOT IN (SELECT id FROM nano_label WHERE category = 'Unable To Do')
+        THEN 1 ELSE NULL END) - 
+        COUNT(DISTINCT CASE WHEN nso.lead_id = nl.id AND CAST(nso.created_date AS BIGINT) BETWEEN CAST($1 AS BIGINT) AND CAST($2 AS BIGINT) THEN nso.created_date ELSE NULL END)
+        ) AS adjusted_other
+
+      FROM nano_appointment na
+      LEFT JOIN nano_leads nl ON nl.id = na.lead_id
+      LEFT JOIN (
+        SELECT lead_id, MAX(CAST(created_date AS BIGINT)) AS created_date
+        FROM nano_sales_order
+        GROUP BY lead_id
+      ) nso ON nso.lead_id = nl.id
+      LEFT JOIN nano_sales ns ON ns.lead_id = nl.id  
+      WHERE $9 = ANY(SELECT jsonb_array_elements_text(na.assigned_to4::jsonb))
+      `;
+
+    // Calculate the date ranges
+    const startOfSelectedPeriod = parseInt(startdate); // Passed start date as timestamp
+    const endOfSelectedPeriod = parseInt(enddate); // Passed end date as timestamp
+    const startOfLastPeriod = new Date(new Date(startOfSelectedPeriod).setMonth(new Date(startOfSelectedPeriod).getMonth() - 1)).getTime();
+    const endOfLastPeriod = new Date(new Date(endOfSelectedPeriod).setMonth(new Date(endOfSelectedPeriod).getMonth() - 1)).getTime();
+    const startOfYear = new Date(selectyear, 0, 1).getTime();
+    const endOfYear = new Date(selectyear, 11, 31, 23, 59, 59).getTime();
+    const startOfLastYear = new Date(selectyear - 1, 0, 1).getTime();
+    const endOfLastYear = new Date(selectyear - 1, 11, 31, 23, 59, 59).getTime();
+
+    // Execute the query with the dynamic parameters
+    client
+      .query(query, [
+        startOfSelectedPeriod, endOfSelectedPeriod, // Selected Period
+        startOfLastPeriod, endOfLastPeriod,         // Last Period
+        startOfYear, endOfYear,                     // This Year
+        startOfLastYear, endOfLastYear,             // Last Year
+        salesex                                     // Sales Executive UID
+      ])
+      .then((result) => {
+        release();
+        return res.status(200).send({ data: result.rows, success: true });
+      })
+      .catch((error) => {
+        release();
+        console.log(error);
+        return res.status(500).send({ success: false });
+      });
+  });
+});
+
+app.post('/getAdsChannelCount', async (req, res) => {
+  console.log('getAdsChannelCount');
+
+  const { month, year } = req.body;
+  if (!month || !year) {
+    return res.status(400).send({ success: false, message: 'Month and Year are required' });
+  }
+
+  const monthIndex = parseInt(month, 10) - 1;
+  const yearInt = parseInt(year, 10);
+  const daysInMonth = new Date(yearInt, monthIndex + 1, 0).getDate();
+
+  // Calculate the end days for each period
+  const range1End = Math.ceil(daysInMonth / 3); // 1st to 1/3 of the month
+  const range2End = Math.ceil((daysInMonth * 2) / 3); // 1st to 2/3 of the month
+  const range3End = daysInMonth; // 1st to the last day of the month
+
+  // Define the three ranges
+  const ranges = [
+    { start: new Date(yearInt, monthIndex, 1).getTime(), end: new Date(yearInt, monthIndex, range1End, 23, 59, 59).getTime() },
+    { start: new Date(yearInt, monthIndex, 1).getTime(), end: new Date(yearInt, monthIndex, range2End, 23, 59, 59).getTime() },
+    { start: new Date(yearInt, monthIndex, 1).getTime(), end: new Date(yearInt, monthIndex, range3End, 23, 59, 59).getTime() }
+  ];
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(500).send({ success: false, message: 'Database connection error' });
+    }
+
+    const query = `
+    SELECT 
+      nl.ads_id AS reference,
+      COUNT(*) AS total,
+      SUM(CASE WHEN nl.label_m = 55 THEN 1 ELSE 0 END) AS appt,
+      ROUND((SUM(CASE WHEN nl.label_m = 55 THEN 1 ELSE 0 END) * 100.0) / COUNT(*), 2) AS rate,
+      CASE 
+        WHEN nl.created_date BETWEEN $1 AND $2 THEN 1 
+        WHEN nl.created_date BETWEEN $1 AND $3 THEN 2 
+        WHEN nl.created_date BETWEEN $1 AND $4 THEN 3 
+        ELSE NULL
+      END AS period
+    FROM nano_leads nl
+    WHERE nl.ads_id IS NOT NULL AND nl.ads_id != ''
+    GROUP BY nl.ads_id, period
+    ORDER BY period ASC, total DESC;
+    `;
+
+    client.query(query, [
+      ranges[0].start, ranges[0].end, // Range 1: First period
+      ranges[1].end, // Range 2: Second period
+      ranges[2].end  // Range 3: Full month
+    ]).then((result) => {
+      release();
+
+      // Prepare the grouped results for each period
+      const groupedResults = [{}, {}, {}];
+      result.rows.forEach((row) => {
+        if (row.period) {
+          const periodIndex = row.period - 1;
+
+          // Ensure the reference exists for the period, if not initialize it
+          if (!groupedResults[periodIndex][row.reference]) {
+            groupedResults[periodIndex][row.reference] = { total: 0, appt: 0, rate: 0 };
+          }
+
+          // Add the current period's total to the period's reference
+          groupedResults[periodIndex][row.reference].total += row.total;
+          groupedResults[periodIndex][row.reference].appt += row.appt;
+
+          // Recalculate the rate for the current period's accumulated data
+          groupedResults[periodIndex][row.reference].rate = groupedResults[periodIndex][row.reference].total > 0
+            ? Math.ceil((groupedResults[periodIndex][row.reference].appt / groupedResults[periodIndex][row.reference].total) * 100)
+            : 0;
+        }
+      });
+
+      // Accumulate data across periods correctly
+      for (let i = 1; i < groupedResults.length; i++) {
+        Object.keys(groupedResults[i - 1]).forEach((reference) => {
+          if (!groupedResults[i][reference]) {
+            groupedResults[i][reference] = { total: 0, appt: 0, rate: 0 };
+          }
+
+          // Accumulate previous period's totals
+          groupedResults[i][reference].total += groupedResults[i - 1][reference].total;
+          groupedResults[i][reference].appt += groupedResults[i - 1][reference].appt;
+
+          // Recalculate rate after accumulation
+          groupedResults[i][reference].rate = groupedResults[i][reference].total > 0
+            ? Math.ceil((groupedResults[i][reference].appt / groupedResults[i][reference].total) * 100)
+            : 0;
+        });
+      }
+
+      // Sort by Period 3's total
+      const sortedReferences = Object.keys(groupedResults[2]).sort((a, b) => {
+        return groupedResults[2][b].total - groupedResults[2][a].total;
+      });
+
+      // Reorder groupedResults based on sorted references
+      const sortedResults = groupedResults.map(period => {
+        let sortedPeriod = {};
+        sortedReferences.forEach(ref => {
+          sortedPeriod[ref] = period[ref];
+        });
+        return sortedPeriod;
+      });
+
+      // Return sorted results
+      return res.status(200).send({ data: sortedResults, success: true });
+
+    }).catch((error) => {
+      release();
+      console.log(error);
+      return res.status(500).send({ success: false, message: 'Query error' });
+    });
+  });
+});
+
+app.post('/getFinanceOverview', async (req, res) => {
+  console.log('getFinanceOverview');
+
+  const { startdate, enddate } = req.body;
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(200).send({ success: false });
+    }
+
+    const query = `
+      SELECT 
+        TO_CHAR(TO_TIMESTAMP(CAST(payment_date AS BIGINT) / 1000), 'YYYY-MM-DD') AS payment_day,
+        SUM(total) AS total_payment
+      FROM nano_payment_log
+      WHERE payment_date BETWEEN $1 AND $2
+      GROUP BY payment_day
+      ORDER BY payment_day;
+    `;
+
+    // Execute the query with the dynamic parameters
+    client
+      .query(query, [startdate, enddate])
+      .then((result) => {
+        release();
+        return res.status(200).send({ data: result.rows, success: true });
+      })
+      .catch((error) => {
+        release();
+        console.log(error);
+        return res.status(800).send({ success: false });
+      });
+  });
+});
+
+app.post('/getFinanceOverview2', async (req, res) => {
+  console.log('getFinanceOverview2');
+
+  const { startdate, enddate, filter } = req.body;
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(200).send({ success: false });
+    }
+
+    let query = `
+      SELECT 
+        TO_CHAR(TO_TIMESTAMP(CAST(p.payment_date AS BIGINT) / 1000), 'YYYY-MM-DD') AS payment_day,
+        SUM(p.total) AS total_payment
+      FROM nano_payment_log p
+    `;
+
+    if (filter === 'full') {
+      query += `
+        JOIN nano_sales s ON p.sales_id = s.id
+        WHERE p.payment_date BETWEEN $1 AND $2 AND s.payment_status = 'Completed'
+      `;
+    } else if (filter === 'deposit') {
+      query += `
+        JOIN nano_sales s ON p.sales_id = s.id
+        WHERE p.payment_date BETWEEN $1 AND $2 AND s.payment_status = 'Pending'
+      `;
+    } else {
+      // default to 'all'
+      query += `
+        WHERE p.payment_date BETWEEN $1 AND $2
+      `;
+    }
+
+    query += `
+      GROUP BY payment_day
+      ORDER BY payment_day;
+    `;
+
+    client
+      .query(query, [startdate, enddate])
+      .then((result) => {
+        release();
+        return res.status(200).send({ data: result.rows, success: true });
+      })
+      .catch((error) => {
+        release();
+        console.error(error);
+        return res.status(800).send({ success: false });
+      });
+  });
+});
+
+
+app.post('/getPaymentGatewayOverview', async (req, res) => {
+  console.log('getPaymentGatewayOverview');
+
+  const { startdate, enddate } = req.body;
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(200).send({ success: false });
+    }
+
+    const query = `
+      WITH gateway_totals AS (
+        SELECT 
+          gateway,
+          COUNT(*) AS usage_count,      -- Count how many times each gateway was used
+          SUM(total) AS total_payment
+        FROM nano_payment_log
+        WHERE payment_date BETWEEN $1 AND $2
+        GROUP BY gateway
+      ), 
+      overall_totals AS (
+        SELECT 
+          SUM(usage_count) AS total_usage, 
+          SUM(total_payment) AS total_all
+        FROM gateway_totals
+      )
+      SELECT 
+        g.gateway,
+        g.usage_count,  
+        g.total_payment,
+        ROUND((g.usage_count::decimal / o.total_usage) * 100, 2) AS usage_percentage  -- Calculate usage percentage based on count
+      FROM gateway_totals g, overall_totals o
+      ORDER BY g.usage_count DESC;
+    `;
+
+    client
+      .query(query, [startdate, enddate])
+      .then((result) => {
+        release();
+        return res.status(200).send({ data: result.rows, success: true });
+      })
+      .catch((error) => {
+        release();
+        console.log(error);
+        return res.status(500).send({ success: false });
+      });
+  });
+});
+
+app.post('/getLeadsByMonthAndYear', async (req, res) => {
+  console.log('getLeadsByMonthAndYear');
+
+  const { month, year } = req.body;
+  if (!month || !year) {
+    return res.status(400).send({ success: false, message: 'Month and Year are required' });
+  }
+
+  const monthInt = parseInt(month, 10);
+  const yearInt = parseInt(year, 10);
+
+  // Calculate the start and end dates for the month
+  const startDate = new Date(yearInt, monthInt - 1, 1);
+  const endDate = new Date(yearInt, monthInt, 0);
+  const startTimestamp = startDate.getTime();
+  const endTimestamp = endDate.getTime() + 86399000;
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(500).send({ success: false, message: 'Database connection error' });
+    }
+
+    const baseTime = "to_timestamp(CAST(created_date AS bigint) / 1000)";
+
+    const dailyQuery = `
+      SELECT 
+        to_char(${baseTime}, 'YYYY-MM-DD') AS lead_date,
+        COUNT(*) AS total_leads
+      FROM nano_leads
+      WHERE created_date BETWEEN $1 AND $2
+      GROUP BY lead_date
+      ORDER BY lead_date;
+    `;
+
+    const annualQuery = `
+      SELECT 
+        TO_CHAR(${baseTime}, 'Month') AS month_name,
+        EXTRACT(MONTH FROM ${baseTime}) AS month_number,
+        COUNT(*) AS total_leads
+      FROM nano_leads
+      WHERE EXTRACT(YEAR FROM ${baseTime}) = $1
+      GROUP BY month_name, month_number
+      ORDER BY month_number;
+    `;
+
+    Promise.all([
+      client.query(dailyQuery, [startTimestamp, endTimestamp]),
+      client.query(annualQuery, [yearInt])
+    ])
+      .then(([dailyResult, annualResult]) => {
+        release();
+
+        const annualData = annualResult.rows.map(row => ({
+          month_name: row.month_name.trim(),
+          month_number: row.month_number,
+          total_leads: row.total_leads
+        }));
+
+        return res.status(200).send({
+          success: true,
+          daily_data: dailyResult.rows,
+          annual_data: annualData
+        });
+      })
+      .catch(error => {
+        release();
+        console.log(error);
+        return res.status(500).send({ success: false, message: 'Query error' });
+      });
+  });
+});
+
+app.post('/getAppointmentsByMonthAndYear', async (req, res) => {
+  console.log('getAppointmentsByMonthAndYear');
+
+  const { month, year } = req.body;
+  if (!month || !year) {
+    return res.status(400).send({ success: false, message: 'Month and Year are required' });
+  }
+
+  const monthInt = parseInt(month, 10);
+  const yearInt = parseInt(year, 10);
+
+  // Calculate the start and end timestamps for the month
+  const startDate = new Date(yearInt, monthInt - 1, 1);
+  const endDate = new Date(yearInt, monthInt, 0);
+  const startTimestamp = startDate.getTime();
+  const endTimestamp = endDate.getTime() + 86399000; // Add 23:59:59 in milliseconds
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(500).send({ success: false, message: 'Database connection error' });
+    }
+
+    const baseTime = "to_timestamp(CAST(a.appointment_time AS bigint) / 1000)";
+
+    const dailyQuery = `
+      SELECT 
+        TO_CHAR(${baseTime}, 'YYYY-MM-DD') AS appointment_date,
+        COUNT(*) AS total_appointments
+      FROM nano_leads l
+      JOIN nano_appointment a ON a.lead_id = l.id
+      WHERE 
+        l.label_m = 55 AND
+        a.appointment_time BETWEEN $1 AND $2
+      GROUP BY appointment_date
+      ORDER BY appointment_date;
+    `;
+
+    const annualQuery = `
+      SELECT 
+        TO_CHAR(${baseTime}, 'Month') AS month_name,
+        EXTRACT(MONTH FROM ${baseTime}) AS month_number,
+        COUNT(*) AS total_appointments
+      FROM nano_leads l
+      JOIN nano_appointment a ON a.lead_id = l.id
+      WHERE 
+        l.label_m = 55 AND
+        EXTRACT(YEAR FROM ${baseTime}) = $1
+      GROUP BY month_name, month_number
+      ORDER BY month_number;
+    `;
+
+    Promise.all([
+      client.query(dailyQuery, [startTimestamp, endTimestamp]),
+      client.query(annualQuery, [yearInt])
+    ])
+      .then(([dailyResult, annualResult]) => {
+        release();
+
+        const annualData = annualResult.rows.map(row => ({
+          month_name: row.month_name.trim(),
+          month_number: row.month_number,
+          total_appointments: row.total_appointments
+        }));
+
+        return res.status(200).send({
+          success: true,
+          daily_data: dailyResult.rows,
+          annual_data: annualData
+        });
+      })
+      .catch(error => {
+        release();
+        console.log(error);
+        return res.status(500).send({ success: false, message: 'Query error' });
+      });
+  });
+});
+
+app.post('/getSalesByMonthAndYear', async (req, res) => {
+  console.log('getSalesByMonthAndYear');
+
+  const { month, year } = req.body;
+  if (!month || !year) {
+    return res.status(400).send({ success: false, message: 'Month and Year are required' });
+  }
+
+  const monthInt = parseInt(month, 10);
+  const yearInt = parseInt(year, 10);
+
+  // Calculate the start and end timestamps for the month
+  const startDate = new Date(yearInt, monthInt - 1, 1);
+  const endDate = new Date(yearInt, monthInt, 0);
+  const startTimestamp = startDate.getTime();
+  const endTimestamp = endDate.getTime() + 86399000; // Add 23:59:59 in milliseconds
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(500).send({ success: false, message: 'Database connection error' });
+    }
+
+    const cte = `
+      WITH earliest_sales_order AS (
+        SELECT DISTINCT ON (nso.lead_id)
+          nso.lead_id,
+          nso.created_date AS sales_timestamp,
+          to_timestamp(nso.created_date::bigint / 1000) AS sales_time
+        FROM nano_sales_order nso
+        ORDER BY nso.lead_id, nso.created_date
+      )
+    `;
+
+    const dailyQuery = `
+      ${cte}
+      SELECT 
+        TO_CHAR(eso.sales_time, 'YYYY-MM-DD') AS sales_date,
+        COUNT(*) AS total_sales
+      FROM nano_leads l
+      JOIN nano_sales s ON s.lead_id = l.id
+      JOIN earliest_sales_order eso ON eso.lead_id = s.lead_id
+      WHERE 
+        l.label_s = 47 AND
+        eso.sales_timestamp BETWEEN $1 AND $2
+      GROUP BY sales_date
+      ORDER BY sales_date;
+    `;
+
+    const annualQuery = `
+      ${cte}
+      SELECT 
+        TO_CHAR(eso.sales_time, 'Month') AS month_name,
+        EXTRACT(MONTH FROM eso.sales_time) AS month_number,
+        COUNT(*) AS total_sales
+      FROM nano_leads l
+      JOIN nano_sales s ON s.lead_id = l.id
+      JOIN earliest_sales_order eso ON eso.lead_id = s.lead_id
+      WHERE 
+        l.label_s = 47 AND
+        EXTRACT(YEAR FROM eso.sales_time) = $1
+      GROUP BY month_name, month_number
+      ORDER BY month_number;
+    `;
+
+    Promise.all([
+      client.query(dailyQuery, [startTimestamp, endTimestamp]),
+      client.query(annualQuery, [yearInt])
+    ])
+      .then(([dailyResult, annualResult]) => {
+        release();
+
+        const annualData = annualResult.rows.map(row => ({
+          month_name: row.month_name.trim(),
+          month_number: row.month_number,
+          total_sales: parseInt(row.total_sales, 10)
+        }));
+
+        return res.status(200).send({
+          success: true,
+          daily_data: dailyResult.rows,
+          annual_data: annualData
+        });
+      })
+      .catch(error => {
+        release();
+        console.log(error);
+        return res.status(500).send({ success: false, message: 'Query error' });
+      });
+  });
+});
+
+
+app.post('/getWorkerSummary', async (req, res) => {
+  const { startdate, enddate } = req.body;
+
+  const startTime = parseInt(startdate);
+  const endTime = parseInt(enddate);
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release();
+      return res.status(500).send({ success: false, message: 'Connection error' });
+    }
+
+    const query = `
+    WITH 
+    -- Filtered Appointments
+    filtered_appointments AS (
+      SELECT 
+        na.id AS appointment_id,
+        na.lead_id,
+        jsonb_array_elements_text(na.assigned_to4::jsonb) AS worker_uid
+      FROM nano_appointment na
+      WHERE na.appointment_time::BIGINT BETWEEN $1 AND $2
+    ),
+
+    -- All Appointments
+    all_appointments AS (
+      SELECT 
+        na.lead_id,
+        jsonb_array_elements_text(na.assigned_to4::jsonb) AS worker_uid
+      FROM nano_appointment na
+      WHERE na.assigned_to4 IS NOT NULL
+    ),
+
+    -- Filtered Sales
+    filtered_sales AS (
+      SELECT *
+      FROM nano_sales_order
+      WHERE created_date::BIGINT BETWEEN $1 AND $2
+    ),
+
+    -- Sales mapped to worker
+    sales_by_worker AS (
+      SELECT DISTINCT 
+        fa.worker_uid,
+        fs.id AS sales_id,
+        fs.lead_id
+      FROM filtered_sales fs
+      JOIN all_appointments fa ON fa.lead_id = fs.lead_id
+    ),
+
+    -- Revenue per worker (updated)
+    payment_totals AS (
+      SELECT 
+        p.created_by AS worker_uid,
+        SUM(p.total) AS revenue
+      FROM nano_payment_log p
+      WHERE p.payment_date::BIGINT BETWEEN $1 AND $2
+      GROUP BY p.created_by
+    ),
+
+    -- Attendance Status
+    latest_check_status AS (
+      SELECT 
+        appointment_id,
+        while_check_status,
+        ROW_NUMBER() OVER (PARTITION BY appointment_id ORDER BY check_time DESC) AS rn
+      FROM nano_check
+    ),
+
+    -- Appointment Stats
+    appointment_stats AS (
+      SELECT
+        fa.worker_uid,
+        fa.appointment_id,
+        na.kiv,
+        nl.label_s,
+        CASE
+          WHEN lcs.while_check_status LIKE 'late%' THEN 'late'
+          WHEN lcs.while_check_status LIKE 'early%' THEN 'early'
+          ELSE 'no_check'
+        END AS attendance_status,
+        CASE WHEN na.kiv IS TRUE THEN true ELSE false END AS is_kiv,
+        CASE WHEN nl.label_s = 81 THEN true ELSE false END AS is_reschedule,
+        CASE WHEN nl.label_s = 80 THEN true ELSE false END AS is_cancelled
+      FROM filtered_appointments fa
+      LEFT JOIN nano_appointment na ON fa.appointment_id = na.id
+      LEFT JOIN nano_leads nl ON nl.id = fa.lead_id
+      LEFT JOIN latest_check_status lcs 
+        ON lcs.appointment_id = fa.appointment_id AND lcs.rn = 1
+    )
+
+    SELECT 
+      u.uid,
+      u.user_id,
+      u.user_name AS name,
+
+      COUNT(DISTINCT fa.appointment_id) AS appt,
+      COUNT(DISTINCT sbw.lead_id) AS sales,
+
+      COUNT(DISTINCT CASE WHEN nl.conditional_status = 'Video Interview' THEN nl.id END) AS video,
+      COUNT(DISTINCT CASE WHEN nl.conditional_status = 'FB like & Share & Google Review' THEN nl.id END) AS review,
+
+      COUNT(DISTINCT CASE WHEN aps.attendance_status = 'late' THEN fa.appointment_id END) AS late_attendance,
+      COUNT(DISTINCT CASE WHEN aps.attendance_status = 'early' THEN fa.appointment_id END) AS early_attendance,
+      COUNT(DISTINCT CASE WHEN aps.attendance_status = 'no_check' THEN fa.appointment_id END) AS no_check_attendance,
+
+      COUNT(DISTINCT CASE WHEN aps.is_kiv THEN fa.appointment_id END) AS no_check_kiv,
+      COUNT(DISTINCT CASE WHEN aps.is_reschedule THEN fa.appointment_id END) AS no_check_reschedule,
+      COUNT(DISTINCT CASE WHEN aps.is_cancelled THEN fa.appointment_id END) AS no_check_cancelled,
+      COUNT(DISTINCT CASE 
+        WHEN aps.attendance_status = 'no_check'
+          AND NOT aps.is_kiv
+          AND NOT aps.is_reschedule
+          AND NOT aps.is_cancelled
+        THEN fa.appointment_id
+      END) AS no_check_others,
+
+      COALESCE(pt.revenue, 0) AS revenue
+
+    FROM nano_user u
+    LEFT JOIN filtered_appointments fa ON fa.worker_uid = u.uid
+    LEFT JOIN nano_leads nl ON nl.id = fa.lead_id
+    LEFT JOIN sales_by_worker sbw ON sbw.worker_uid = u.uid
+    LEFT JOIN appointment_stats aps ON aps.worker_uid = u.uid AND aps.appointment_id = fa.appointment_id
+    LEFT JOIN payment_totals pt ON pt.worker_uid = u.uid
+
+    WHERE u.status IS DISTINCT FROM false
+      AND u.user_role = 'Sales Executive'
+      AND u.uid != 'LbdDaz3w3yPFVjTEQVr6PbGP3PC3'
+
+    GROUP BY u.uid, u.user_id, u.user_name, pt.revenue
+    ORDER BY u.user_id;
+    `;
+
+    client.query(query, [startTime, endTime])
+      .then((result) => {
+        release();
+        return res.status(200).send({ success: true, data: result.rows });
+      })
+      .catch((error) => {
+        release();
+        console.error(error);
+        return res.status(500).send({ success: false });
+      });
+  });
+});
+
+
+
+
+
+
+
 app.get('/getAllLeadList', async (req, res) => {
   console.log('getAllLeadList')
 
@@ -1839,88 +3168,54 @@ app.get('/getAllLeadList', async (req, res) => {
       return res.status(200).send({ success: false })
     }
 
-    client.query(`WITH selected AS (
-            SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
-              nc.no AS check_details,
-              (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
-              (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
-              ELSE nl.created_date::bigint end) AS created_date,
-              (SELECT created_date FROM nano_sales WHERE appointment_id = nat.id LIMIT 1) AS appoint_date,
-            CASE 
-            WHEN nl.customer_phone IS NULL THEN 0
-            ELSE  row_number() over (partition by nl.customer_phone ORDER BY nl.created_date ASC NULLS LAST)
-            END as phone_row_number,
-              nls.status AS whole_status,
-              nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state, nl.verified,
-                nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues,nl.status AS lead_status,nl.ads_id, nl.channel_id, nat.appointment_status, nls.payment_status, 
-                nls.total AS payment_total, nls.sales_status, nat.assigned_to4, nat.assigned_to, nat.checkin, nat.kiv,
-                (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, 
-                (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
-                (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, 
-                nls.subcon_state, nls.finance_check, nls.finance_remark, 
-                CASE
-                WHEN (nls.gen_quotation::TEXT = '[]' OR nls.gen_quotation IS NULL) AND (nls.custom_quotation::TEXT = '[]' OR nls.custom_quotation IS NULL) THEN false
-                else true
-                END as got_quotation,
-                (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
-                nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
-                FROM nano_leads nl LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id LEFT JOIN nano_user u1 ON nl.created_by = u1.uid LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
-                LEFT JOIN nano_label nla ON nl.label_m = nla.id LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id LEFT JOIN 
-                nano_sales nls ON nat.id = nls.appointment_id LEFT JOIN nano_check nc ON  nc.appointment_id = nat.id ORDER BY lead_id asc
-              ) SELECT DISTINCT ON (s.lead_id) s.*, (SELECT created_date AS sof_latest_created_date FROM nano_sales_order nso WHERE nso.lead_id = s.lead_id ORDER BY nso.created_date LIMIT 1)
-              FROM selected s
-              ORDER BY s.lead_id`
-    ).then((result) => {
+    client.query(`
+      WITH selected AS (
+        SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, 
+          nl.warranty_id, nc.no AS check_details, COALESCE(EXTRACT(epoch from nl.created_date::date) * 1000, nl.created_date::bigint) AS created_date, 
+          (SELECT created_date FROM nano_sales WHERE appointment_id = nat.id LIMIT 1) AS appoint_date,
+          CASE WHEN nl.customer_phone IS NULL THEN 0 ELSE row_number() OVER (PARTITION BY nl.customer_phone ORDER BY nl.created_date ASC NULLS LAST)
+          END AS phone_row_number, nls.status AS whole_status, nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state, nl.verified, nl.address, 
+          nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues, nl.status AS lead_status, nl.ads_id, nl.channel_id, nat.appointment_status, nls.payment_status, 
+          nls.total AS payment_total, nls.sales_status, nat.assigned_to4, nat.assigned_to, nat.checkin, nat.kiv,
+          (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, 
+          (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
+            (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, 
+          nls.subcon_state, nls.finance_check, nls.finance_remark, 
+          (CASE
+            WHEN (nls.gen_quotation::TEXT = '[]' OR nls.gen_quotation IS NULL) AND 
+                 (nls.custom_quotation::TEXT = '[]' OR nls.custom_quotation IS NULL) 
+            THEN false 
+            ELSE true 
+          END) AS got_quotation,
+          (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category, nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
+        FROM nano_leads nl 
+        LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id 
+        LEFT JOIN nano_user u1 ON nl.created_by = u1.uid 
+        LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
+        LEFT JOIN nano_label nla ON nl.label_m = nla.id 
+        LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id 
+        LEFT JOIN nano_sales nls ON nat.id = nls.appointment_id 
+        LEFT JOIN nano_check nc ON nc.appointment_id = nat.id 
+        ORDER BY lead_id
+      )
+      SELECT DISTINCT ON (s.lead_id) s.*, 
+             (SELECT created_date AS sof_latest_created_date 
+              FROM nano_sales_order nso 
+              WHERE nso.lead_id = s.lead_id 
+              ORDER BY nso.created_date LIMIT 1) AS sof_latest_created_date
+      FROM selected s
+      ORDER BY s.lead_id;
+    `).then((result) => {
       release()
       return res.status(200).send({ data: result.rows, success: true })
-
     }).catch((error) => {
       release()
       console.log(error)
       return res.status(800).send({ success: false })
     })
-
-  })
-
-})
-
-app.post('/getLeadList', async (req, res) => {
-  console.log('getLeadList')
-  pool.query(`WITH selected AS (
-    SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
-      (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
-      (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
-      ELSE nl.created_date::bigint end) AS created_date,
-      CASE 
-      WHEN nl.customer_phone IS NULL THEN 0
-      ELSE  row_number() over (partition by nl.customer_phone ORDER BY nl.created_date ASC NULLS LAST)
-      END as phone_row_number,
-      CASE 
-      WHEN nl.address IS NULL THEN 0
-      ELSE row_number() over (partition by nl.address ORDER BY nl.created_date ASC NULLS LAST)
-      END as address_row_number,
-      nls.status AS whole_status,
-      nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state, nl.verified,
-        nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues,nl.status AS lead_status,nl.ads_id, nl.channel_id,nat.kiv, nat.appointment_status, nls.payment_status, 
-        nls.total AS payment_total, nls.sales_status, nat.assigned_to4,nat.assigned_to, nat.checkin,
-        (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, 
-        (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
-        (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, 
-        nls.subcon_state, nls.finance_check, nls.finance_remark, 
-        (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
-        nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
-        FROM nano_leads nl LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id LEFT JOIN nano_user u1 ON nl.created_by = u1.uid LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
-        LEFT JOIN nano_label nla ON nl.label_m = nla.id LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id LEFT JOIN 
-        nano_sales nls ON nat.id = nls.appointment_id 
-      ) SELECT * FROM selected WHERE ((phone_row_number = 1 OR phone_row_number = 0) OR warranty_id IS NOT NULL OR verified = true) AND ((created_date::bigint) > $1 AND (created_date::bigint) < $2)`, [req.body.startDate, req.body.endDate]
-  ).then((result) => {
-    return res.status(200).send({ data: result.rows, success: true })
-
-  }).catch((error) => {
-    console.log(error)
-    return res.status(800).send({ success: false })
   })
 })
+
 
 
 app.post('/getLeadList3', async (req, res) => {
@@ -1933,7 +3228,8 @@ app.post('/getLeadList3', async (req, res) => {
     }
 
     client.query(`WITH selected AS (
-            SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+            SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour,
+             nl.warranty_id,
               (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
               (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
               ELSE nl.created_date::bigint end) AS created_date,
@@ -1984,52 +3280,60 @@ app.post('/getLeadListMarketing', async (req, res) => {
     }
 
     client.query(`
-          WITH selected AS (
-              SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
-                  (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
-                  (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
-                  ELSE nl.created_date::bigint end) AS created_date,
-                  CASE 
-                  WHEN nl.customer_phone IS NULL THEN 0
-                  ELSE  row_number() over (partition by nl.customer_phone ORDER BY nl.created_date ASC NULLS LAST)
-                  END as phone_row_number,
-                  CASE 
-                  WHEN nl.address IS NULL THEN 0
-                  ELSE row_number() over (partition by nl.address ORDER BY nl.created_date ASC NULLS LAST)
-                  END as address_row_number,
-                  nls.status AS whole_status,
-                  nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state, nl.verified, nl.mkt_inspect, nl.mkt_install, nl.mkt_inspect_log, nl.mkt_install_log,
-                  nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues,nl.status AS lead_status,nl.ads_id, nl.channel_id,nat.kiv, nat.appointment_status, nat.appointment_time, nls.payment_status, 
-                  nls.total AS payment_total, nls.sales_status, nat.assigned_to4, nat.assigned_to, nat.checkin, nls.final_approval,
-                  (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, 
-                  (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
-                  (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, 
-                  nls.subcon_state, nls.finance_check, nls.finance_remark, nls.id as sales_id,
-                  (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
-                  nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
-              FROM nano_leads nl 
-              LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id 
-              LEFT JOIN nano_user u1 ON nl.created_by = u1.uid 
-              LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
-              LEFT JOIN nano_label nla ON nl.label_m = nla.id 
-              LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id 
-              LEFT JOIN nano_sales nls ON nat.id = nls.appointment_id 
-          ), 
-          sales_packages AS (
-              SELECT 
-                  sales_id,
-                  jsonb_agg(row_to_json(sp)::jsonb) AS sales_packages
-              FROM nano_sales_package sp
-              GROUP BY sales_id
-          )
-          SELECT 
-              s.*,
-              sp.sales_packages
-          FROM selected s
-          LEFT JOIN sales_packages sp ON s.sales_id = sp.sales_id
-          WHERE 
-              (s.created_date::bigint > $1 AND s.created_date::bigint < $2) AND 
-              (s.mkt_inspect IS TRUE OR s.mkt_install IS TRUE)
+    WITH selected AS (
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, 
+             nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+             COALESCE(
+                 (SELECT EXTRACT(epoch from created_date::date) * 1000 
+                  FROM nano_leads WHERE id = nl.id AND created_date LIKE '%-%'),
+                 nl.created_date::bigint
+             ) AS created_date,
+             ROW_NUMBER() OVER (PARTITION BY nl.customer_phone ORDER BY nl.created_date ASC NULLS LAST) AS phone_row_number,
+             ROW_NUMBER() OVER (PARTITION BY nl.address ORDER BY nl.created_date ASC NULLS LAST) AS address_row_number,
+             nls.status AS whole_status,
+             nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.mkt_created, 
+             nl.customer_state, nl.verified, nl.mkt_inspect, nl.mkt_install, nl.mkt_inspect_log, 
+             nl.mkt_install_log, nl.address, nl.company_address, nl.saleexec_note, 
+             nl.remark, nl.services, nl.issues, nl.status AS lead_status, nl.ads_id, 
+             nl.channel_id, nat.kiv, nat.appointment_status, nat.appointment_time, 
+             nls.payment_status, nls.total AS payment_total, nls.sales_status, 
+             nat.assigned_to4, nat.assigned_to, nat.checkin, nls.final_approval,
+             (SELECT SUM(total) 
+              FROM nano_payment_log 
+              WHERE sales_id = nls.id) AS total_paid,
+             (SELECT id 
+              FROM nano_sales 
+              WHERE id = nls.id AND total = 
+                    (SELECT SUM(total) 
+                     FROM nano_payment_log 
+                     WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid,
+             nls.subcon_state, nls.finance_check, nls.finance_remark, nls.id AS sales_id,
+             (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
+             nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
+      FROM nano_leads nl 
+      LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id 
+      LEFT JOIN nano_user u1 ON nl.created_by = u1.uid 
+      LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
+      LEFT JOIN nano_label nla ON nl.label_m = nla.id 
+      LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id 
+      LEFT JOIN nano_sales nls ON nat.id = nls.appointment_id
+      WHERE 
+          nl.created_date::bigint > $1 AND 
+          nl.created_date::bigint < $2 AND
+          (nl.mkt_inspect IS TRUE OR nl.mkt_install IS TRUE OR nl.mkt_created IS TRUE)
+  ), 
+  sales_packages AS (
+      SELECT 
+          sales_id,
+          jsonb_agg(row_to_json(sp)::jsonb) AS sales_packages
+      FROM nano_sales_package sp
+      GROUP BY sales_id
+  )
+  SELECT 
+      s.*,
+      sp.sales_packages
+  FROM selected s
+  LEFT JOIN sales_packages sp ON s.sales_id = sp.sales_id;
       `, [req.body.startDate, req.body.endDate]
     ).then((result) => {
       release()
@@ -2043,7 +3347,46 @@ app.post('/getLeadListMarketing', async (req, res) => {
   });
 });
 
+app.post('/getMarketingLeads', async (req, res) => {
+  console.log('getMarketingLeads')
 
+  pool.connect((err, client, release) => {
+    if (err) {
+      release()
+      return res.status(200).send({ success: false })
+    }
+
+    client.query(`
+      WITH sales_packages AS (
+          SELECT 
+              sales_id,
+              jsonb_agg(row_to_json(sp)::jsonb) AS sales_packages
+          FROM nano_sales_package sp
+          GROUP BY sales_id
+      )
+      SELECT 
+          nl.*,
+          na.appointment_time,
+          sp.sales_packages
+      FROM nano_leads nl
+      LEFT JOIN nano_appointment na ON nl.id = na.lead_id
+      LEFT JOIN nano_sales ns ON na.id = ns.appointment_id
+      LEFT JOIN sales_packages sp ON ns.id = sp.sales_id
+      WHERE nl.inspect_date IS NOT NULL
+      AND nl.created_date::bigint > $1 
+      AND nl.created_date::bigint < $2
+    `, [req.body.startDate, req.body.endDate]
+    ).then((result) => {
+      release()
+      return res.status(200).send({ data: result.rows, success: true })
+
+    }).catch((error) => {
+      release()
+      console.log(error)
+      return res.status(800).send({ success: false })
+    });
+  });
+});
 
 app.get('/getLeadList3ForQuotationRequest', async (req, res) => {
   console.log('getLeadList3ForQuotationRequest')
@@ -2056,7 +3399,8 @@ app.get('/getLeadList3ForQuotationRequest', async (req, res) => {
 
 
     client.query(`WITH selected AS (
-            SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+            SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour,
+             nl.warranty_id,
               (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
               (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
               ELSE nl.created_date::bigint end) AS created_date,
@@ -2105,8 +3449,9 @@ app.get('/getLeadList3ForQuotationRequest2', async (req, res) => {
       return res.status(200).send({ success: false })
     }
 
-    client.query(`SELECT DISTINCT ON (nano_leads.id) nano_leads.*, nano_sales.*
+    client.query(`SELECT DISTINCT ON (nano_leads.id) nano_leads.*, nano_sales.*, u1.user_name AS sales_coord
     FROM nano_leads LEFT JOIN nano_sales ON nano_sales.lead_id = nano_leads.id
+    LEFT JOIN nano_user u1 ON nano_leads.sales_coordinator = u1.uid
     WHERE nano_sales.quotation_request = true
     ORDER BY nano_leads.id, nano_sales.quotation_request_date DESC`).then((result) => {
       release()
@@ -2138,7 +3483,7 @@ app.post('/getLeadList3SOFversion', async (req, res) => {
                WHEN EXISTS (SELECT * FROM nano_sales_order nso WHERE nso.lead_id = nl.id)
                THEN true
               ELSE false
-            END AS sof, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+            END AS sof, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
               (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
               (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
               ELSE nl.created_date::bigint end) AS created_date,
@@ -2198,18 +3543,52 @@ app.post('/getLeadList3SOFversion2', async (req, res) => {
       release()
       return res.status(200).send({ success: false })
     }
+    // AND ((sof.sof_latest_created_date::BIGINT) > $1 AND (sof.sof_latest_created_date::BIGINT) < $2);
 
-    client.query(`SELECT DISTINCT ON (nl.id)  nl.*, ns.*, sof.sof_latest_created_date, u1.user_name AS sales_coord,
+    client.query(`SELECT DISTINCT ON (nl.id)  nl.*, ns.*, sof.sof_latest_created_date, sof.isvoid, u1.user_name AS sales_coord,
       ( SELECT JSON_AGG(user_name) FROM nano_user WHERE uid IN ( SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(nat.assigned_to4::JSONB))) AS user_name,
       ( SELECT SUM(total) FROM nano_payment_log WHERE sales_id = ns.id AND (ac_approval IS NULL OR sc_approval IS NULL)) AS pending_approve
       FROM nano_leads nl
       LEFT JOIN nano_sales ns ON ns.lead_id = nl.id
-      LEFT JOIN (SELECT lead_id, MAX(created_date::BIGINT) AS sof_latest_created_date FROM nano_sales_order GROUP BY lead_id) AS sof ON sof.lead_id = ns.lead_id
+      LEFT JOIN (SELECT lead_id, MAX(created_date::BIGINT) AS sof_latest_created_date, isvoid FROM nano_sales_order GROUP BY lead_id, isvoid) AS sof ON sof.lead_id = ns.lead_id
       LEFT JOIN nano_user u1 ON nl.sales_coordinator = u1.uid
       LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id
       WHERE (EXISTS (SELECT 1 FROM nano_sales_order nso WHERE nso.lead_id = nl.id))
-      AND ((ns.created_date::BIGINT) > $1 AND (ns.created_date::BIGINT) < $2);
+      AND ((sof.sof_latest_created_date::BIGINT) > $1 AND (sof.sof_latest_created_date::BIGINT) < $2);
     `, [req.body.startDate, req.body.endDate]
+    ).then((result) => {
+      release()
+      return res.status(200).send({ data: result.rows, success: true })
+    }).catch((error) => {
+      release()
+      console.log(error)
+      return res.status(800).send({ success: false })
+    })
+
+  })
+
+})
+
+app.post('/getLeadList3SOFversion2a', async (req, res) => {
+  console.log('getLeadList3SOFversion2a')
+
+  pool.connect((err, client, release) => {
+    if (err) {
+      release()
+      return res.status(200).send({ success: false })
+    }
+    // AND ((sof.sof_latest_created_date::BIGINT) > $1 AND (sof.sof_latest_created_date::BIGINT) < $2);
+
+    client.query(`SELECT DISTINCT ON (nl.id)  nl.*, ns.*, sof.sof_latest_created_date, sof.isvoid, u1.user_name AS sales_coord,
+      ( SELECT JSON_AGG(user_name) FROM nano_user WHERE uid IN ( SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(nat.assigned_to4::JSONB))) AS user_name,
+      ( SELECT SUM(total) FROM nano_payment_log WHERE sales_id = ns.id AND (ac_approval IS NULL OR sc_approval IS NULL)) AS pending_approve
+      FROM nano_leads nl
+      LEFT JOIN nano_sales ns ON ns.lead_id = nl.id
+      LEFT JOIN (SELECT lead_id, MAX(created_date::BIGINT) AS sof_latest_created_date, isvoid FROM nano_sales_order GROUP BY lead_id, isvoid) AS sof ON sof.lead_id = ns.lead_id
+      LEFT JOIN nano_user u1 ON nl.sales_coordinator = u1.uid
+      LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id
+      WHERE (EXISTS (SELECT 1 FROM nano_sales_order nso WHERE nso.lead_id = nl.id))
+    `, []
     ).then((result) => {
       release()
       return res.status(200).send({ data: result.rows, success: true })
@@ -2232,8 +3611,8 @@ app.post('/getLeadListAttended', async (req, res) => {
       return res.status(200).send({ success: false })
     }
 
-    client.query(`SELECT nl.*, ns.*, sof.sof_latest_created_date, u1.user_name AS sales_coord, nc.check_time as checkin_time,
-    nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour,
+    client.query(`SELECT nl.*, ns.*, sof.sof_latest_created_date, u1.user_name AS sales_coord, nc.check_time as checkin_time, nla.id AS label_m_id,
+    nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour,
       ( SELECT JSON_AGG(user_name) FROM nano_user WHERE uid IN ( SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(nat.assigned_to4::JSONB))) AS user_name,
       ( SELECT SUM(total) FROM nano_payment_log WHERE sales_id = ns.id AND (ac_approval IS NULL OR sc_approval IS NULL)) AS pending_approve
       FROM nano_leads nl
@@ -2275,7 +3654,7 @@ app.post('/getLeadList3paymentversion', async (req, res) => {
                WHEN EXISTS(SELECT * FROM nano_payment_log npl2 WHERE npl2.sales_id = nls.id)
                THEN true
               ELSE false
-            END AS payment, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+            END AS payment, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
               (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
               (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
               ELSE nl.created_date::bigint end) AS created_date,
@@ -2330,46 +3709,39 @@ app.post('/getLeadList3scheduleversion', async (req, res) => {
     }
 
 
-    client.query(`WITH selected AS (
-            SELECT nl.id AS lead_id, 
-            CASE
-               WHEN EXISTS(SELECT * FROM nano_schedule nsc2 WHERE nsc2.sales_id = nls.id)
-               THEN true
-              ELSE false
-            END AS schedule, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
-            (SELECT COUNT(id) FROM nano_schedule WHERE sales_id = nls.id) AS schedule_count,
-            (SELECT * FROM
-              (SELECT JSON_AGG(JSON_BUILD_OBJECT('schedule_date', schedule_date::bigint)) FROM
-              (SELECT schedule_date FROM nano_schedule WHERE sales_id = nls.id ORDER BY schedule_date ASC) p) agg) AS schedule_list,
-              (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
-              (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
-              ELSE nl.created_date::bigint end) AS created_date,
-              CASE 
-              WHEN nl.customer_phone IS NULL THEN 0
-              ELSE  row_number() over (partition by nl.customer_phone ORDER BY nl.created_date ASC NULLS LAST)
-              END as phone_row_number,
-              CASE 
-              WHEN nl.address IS NULL THEN 0
-              ELSE row_number() over (partition by nl.address ORDER BY nl.created_date ASC NULLS LAST)
-              END as address_row_number,
-              nls.status AS whole_status,
-              nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state, nl.verified,
-                nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, nl.issues,nl.status AS lead_status,nl.ads_id, nl.channel_id,nat.kiv, nat.appointment_status, nls.payment_status, 
-                nls.total AS payment_total, nls.sales_status, nat.assigned_to4, nat.assigned_to, nat.checkin,
-                (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id) AS total_paid, 
-                (SELECT id FROM nano_sales WHERE id = nls.id AND total = 
-                (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, 
-                nls.subcon_state, nls.finance_check, nls.finance_remark, nls.id,
-                (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
-                nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
-                FROM nano_leads nl LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id LEFT JOIN nano_user u1 ON nl.created_by = u1.uid LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
-                LEFT JOIN nano_label nla ON nl.label_m = nla.id LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id LEFT JOIN 
-                nano_sales nls ON nat.id = nls.appointment_id
-              ) SELECT *, assigned_to4, (SELECT JSON_AGG(user_name) from nano_user 
-              WHERE uid IN (
-        SELECT value::text
-        FROM JSONB_ARRAY_ELEMENTS_TEXT(assigned_to4::JSONB)
-        )) as user_name FROM selected WHERE schedule = true AND ((created_date::bigint) > $1 AND (created_date::bigint) < $2)`, [req.body.startDate, req.body.endDate]
+    client.query(`WITH filtered_leads AS (
+      SELECT 
+        nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,nl.created_date::bigint AS created_date,
+        nl.customer_name, nl.customer_email, nl.customer_phone, nl.customer_city, nl.customer_state, nl.verified,nl.address, nl.company_address, nl.saleexec_note, nl.remark, nl.services, 
+        nl.issues, nl.status AS lead_status, nl.ads_id, nl.channel_id, nl.lattitude, nl.longtitude,nl.label_m,nl.label_s,nat.kiv, nat.appointment_status, nat.assigned_to4, nat.assigned_to, 
+        nat.checkin,nls.id AS sales_id, nls.status AS whole_status,nls.payment_status, nls.total AS payment_total, nls.sales_status, nls.subcon_state, nls.finance_check, 
+        nls.finance_remark,u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
+      FROM nano_leads nl
+      LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id
+      LEFT JOIN nano_user u1 ON nl.created_by = u1.uid
+      LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
+      LEFT JOIN nano_label nla ON nl.label_m = nla.id
+      LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id
+      LEFT JOIN nano_sales nls ON nat.id = nls.appointment_id
+      WHERE nl.created_date::bigint > $1 AND nl.created_date::bigint < $2),
+    schedule_counts AS (SELECT sales_id, COUNT(*) AS schedule_count, JSON_AGG(JSON_BUILD_OBJECT('schedule_date', schedule_date::bigint)) AS schedule_list
+      FROM nano_schedule GROUP BY sales_id),
+    total_paid_sums AS (SELECT sales_id, SUM(total) AS total_paid
+      FROM nano_payment_log WHERE ac_approval = 'Approved' AND sc_approval = 'Approved' GROUP BY sales_id),
+    result AS (SELECT fl.*, sc.schedule_count, sc.schedule_list, COALESCE(tp.total_paid, 0) AS total_paid,
+        CASE 
+          WHEN tp.total_paid IS NOT NULL AND fl.payment_total = tp.total_paid THEN fl.sales_id ELSE NULL 
+        END AS approved_paid,
+        (SELECT JSON_AGG(user_name) FROM nano_user WHERE uid IN (
+          SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(fl.assigned_to4::JSONB)
+        )) AS user_name,
+        (SELECT category FROM nano_channel WHERE name = fl.channel_id) AS category
+      FROM filtered_leads fl
+      LEFT JOIN schedule_counts sc ON fl.sales_id = sc.sales_id
+      LEFT JOIN total_paid_sums tp ON fl.sales_id = tp.sales_id
+      WHERE sc.schedule_count > 0)
+    SELECT * FROM result;
+    `, [req.body.startDate, req.body.endDate]
     ).then((result) => {
       release()
       return res.status(200).send({ data: result.rows, success: true })
@@ -2390,7 +3762,7 @@ app.post('/getLeadList3scheduleversion', async (req, res) => {
 app.post('/getLeadList2', async (req, res) => {
   console.log('getLeadList2')
   pool.query(`WITH selected AS (
-      SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
         (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
         (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
         ELSE nl.created_date::bigint end) AS created_date,
@@ -2429,7 +3801,7 @@ app.post('/getLeadList2', async (req, res) => {
 app.post('/getLeadListForApp', async (req, res) => {
   console.log('getLeadListForApp')
   pool.query(`WITH selected AS (
-      SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
         (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
         (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
         ELSE nl.created_date::bigint end) AS created_date,
@@ -2468,7 +3840,7 @@ app.post('/getLeadListForApp', async (req, res) => {
 app.post('/getLeadListForAppByname', async (req, res) => {
   console.log('getLeadListForAppByname')
   pool.query(`WITH selected AS (
-      SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
         (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
         (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
         ELSE nl.created_date::bigint end) AS created_date,
@@ -2517,7 +3889,7 @@ app.post('/getPendingAppointment', async (req, res) => {
     let role = req.body.user_role
     if (role == 'Super Admin' || role == 'System Admin') {
       client.query(`WITH selected AS (
-          SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, 
+          SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, 
         nla2.colour AS label_s_colour, nl.warranty_id,
             (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
             (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
@@ -2557,7 +3929,7 @@ app.post('/getPendingAppointment', async (req, res) => {
     else if (role == 'Sales Coordinator') {
       // ( label_s = 'Pending Appointment Date' OR  label_s = 'Appointment Cancelled' OR label_s = 'Appointment Reschedule') AND (((phone_row_number = 1 OR phone_row_number = 0) OR verified = true) AND warranty_id IS NULL)
       client.query(`WITH selected AS (
-          SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, 
+          SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, 
         nla2.colour AS label_s_colour, nl.warranty_id,
             (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
             (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
@@ -2597,7 +3969,7 @@ app.post('/getPendingAppointment', async (req, res) => {
     }
     else if (role == 'Sales Executive') {
       client.query(`WITH selected AS (
-          SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, 
+          SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, 
         nla2.colour AS label_s_colour, nl.warranty_id,
             (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
             (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
@@ -2637,7 +4009,7 @@ app.post('/getPendingAppointment', async (req, res) => {
     }
     else {
       client.query(`WITH selected AS (
-          SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, 
+          SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, 
         nla2.colour AS label_s_colour, nl.warranty_id,
             (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
             (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
@@ -2780,7 +4152,7 @@ app.post('/getWarrantyList', async (req, res) => {
   let role = req.body.user_role
   if (role == 'Super Admin' || role == 'System Admin') {
     pool.query(`WITH selected AS (
-      SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
         (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
         (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
         ELSE nl.created_date::bigint end) AS created_date,
@@ -2816,7 +4188,7 @@ app.post('/getWarrantyList', async (req, res) => {
   }
   else if (role == 'Sales Coordinator') {
     pool.query(`WITH selected AS (
-      SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, 
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, 
     nla2.colour AS label_s_colour, nl.warranty_id,
         (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
         (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
@@ -2853,7 +4225,7 @@ app.post('/getWarrantyList', async (req, res) => {
   }
   else if (role == 'Sales Executive') {
     pool.query(`WITH selected AS (
-      SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, 
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, 
     nla2.colour AS label_s_colour, nl.warranty_id,
         (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
         (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
@@ -2896,7 +4268,7 @@ app.post('/getMyLead', async (req, res) => {
   let role = req.body.user_role
   if (role == 'Sales Coordinator') {
     pool.query(`WITH selected AS (
-      SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, 
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, 
     nla2.colour AS label_s_colour, nl.warranty_id,
         (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
         (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
@@ -2933,7 +4305,7 @@ app.post('/getMyLead', async (req, res) => {
   }
   else if (role == 'Sales Executive') {
     pool.query(`WITH selected AS (
-      SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, 
+      SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, 
     nla2.colour AS label_s_colour, nl.warranty_id,
         (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
         (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
@@ -3007,7 +4379,7 @@ app.post('/getDuplicateList', async (req, res) => {
   address, company_address, saleexec_note, remark, services, issues::JSONB, lead_status, ads_id, channel_id, payment_status, payment_total, sales_status, assigned_to4, checkin, total_paid,
    approved_paid, subcon_state, finance_check, finance_remark, category, lattitude, longtitude, created_by, sales_coord, sales_coord_uid
   FROM (
-    SELECT nl.id AS lead_id, nl.customer_title, nla.name AS label_m, nla.colour AS label_m_colour, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
+    SELECT nl.id AS lead_id, nl.customer_title, nla.id AS label_m_id, nla.name AS label_m, nla.colour AS label_m_colour, nla2.id AS label_s_id, nla2.name AS label_s, nla2.colour AS label_s_colour, nl.warranty_id,
     (SELECT CASE WHEN (SELECT id FROM nano_leads WHERE created_date LIKE '%-%' AND id = nl.id) IS NOT NULL THEN 
     (SELECT EXTRACT(epoch from created_date::date) * 1000 FROM nano_leads WHERE id = nl.id)
     ELSE nl.created_date::bigint end) AS created_date,
@@ -3095,7 +4467,21 @@ app.post('/updateFinanceCheck', async (req, res) => {
 })
 
 
+// update subcon in sales
+app.post('/updateSalesMaintain', async (req, res) => {
+  console.log('updateSalesMaintain')
 
+  pool.query(`UPDATE nano_sales SET (m_choice, m_state, m_pending_subcon, selected_photo) = ($1, $2, $3, $5)
+   WHERE id = (SELECT id FROM nano_sales WHERE appointment_id = $4)`,
+    [req.body.m_choice, req.body.m_state, req.body.m_pending_subcon, req.body.id, req.body.selected_photo]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ success: false })
+    })
+})
 
 // update subcon in sales
 app.post('/updateSalesSub', async (req, res) => {
@@ -3104,6 +4490,22 @@ app.post('/updateSalesSub', async (req, res) => {
   pool.query(`UPDATE nano_sales SET (subcon_choice, subcon_state, pending_subcon) = ($1, $2, $3)
    WHERE id = (SELECT id FROM nano_sales WHERE appointment_id = $4)`,
     [req.body.choice, req.body.state, req.body.pending_subcon, req.body.id]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ success: false })
+    })
+})
+
+// update subcon in sales
+app.post('/updateSalesSub3', async (req, res) => {
+  console.log('updateSalesSub3')
+
+  pool.query(`UPDATE nano_sales SET (subcon_choice, subcon_state, pending_subcon, selected_photo) = ($1, $2, $3, $5)
+   WHERE id = (SELECT id FROM nano_sales WHERE appointment_id = $4)`,
+    [req.body.choice, req.body.state, req.body.pending_subcon, req.body.id, req.body.selected_photo]).then((result) => {
 
       return res.status(200).send({ success: true })
 
@@ -3149,9 +4551,9 @@ app.post('/updateSalesSub2', async (req, res) => {
 app.post('/updateSalesSubTeam', async (req, res) => {
   console.log('updateSalesSubTeam')
 
-  pool.query(`UPDATE nano_sales SET sub_team = $1
+  pool.query(`UPDATE nano_sales SET sub_team = $1, is_postpone = $3
    WHERE id = $2`,
-    [req.body.sub_team, req.body.sales_id]).then((result) => {
+    [req.body.sub_team, req.body.sales_id, false]).then((result) => {
 
       return res.status(200).send({ success: true })
 
@@ -3192,7 +4594,7 @@ app.post('/updatedata', async (req, res) => {
 app.get('/getAds', async (req, res) => {
   console.log('getAds')
 
-  pool.query(`SELECT * FROM nano_ads`).then((result) => {
+  pool.query(`SELECT * FROM nano_ads ORDER BY created_date DESC`).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -3256,6 +4658,104 @@ app.post('/createAds', async (req, res) => {
 
 })
 
+app.post('/createAds2', async (req, res) => {
+  console.log('createAds')
+  req.body.created = new Date().getTime()
+  pool.query(`INSERT INTO nano_ads(name, status, created_date, ads_id, platform) 
+   VALUES($1,true,$2,$3,$4)`, [req.body.name, req.body.created, req.body.ads_id, req.body.platform]).then((result) => {
+
+    return res.status(200).send({ success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
+app.post('/createAds3', async (req, res) => {
+  console.log('createAds')
+  req.body.created = new Date().getTime()
+  pool.query(`INSERT INTO nano_ads(name, status, created_date, ads_id, platform, price, image, video, activity, link) 
+   VALUES($1,true,$2,$3,$4, $5, $6, $7, $8, $9)`, [req.body.name, req.body.created, req.body.ads_id, req.body.platform, req.body.price, req.body.image, req.body.video, req.body.activity, req.body.link]).then((result) => {
+
+    return res.status(200).send({ success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
+app.post('/createAdsPlatform', async (req, res) => {
+  console.log('createAdsPlatform')
+  req.body.created = new Date().getTime()
+  pool.query(`INSERT INTO ads_platform(name, date_created) 
+   VALUES($1, $2)`, [req.body.name, req.body.created]).then((result) => {
+
+    return res.status(200).send({ success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
+app.post('/updateAdsPlatform', async (req, res) => {
+  console.log('updateAdsPlatform')
+  req.body.update_date = new Date().getTime()
+  pool.query(`UPDATE ads_platform SET (name, status, date_updated) = ($1,$2, $3) WHERE id = $4`, [req.body.name, req.body.status, req.body.update_date, req.body.id]).then((result) => {
+
+    return res.status(200).send({ success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
+app.get('/getAllAdsPlatform', async (req, res) => {
+  console.log('getAllAdsPlatform')
+
+  pool.query(`SELECT * FROM ads_platform ORDER by id DESC`).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+})
+
+app.get('/getActiveAdsPlatform', async (req, res) => {
+  console.log('getActiveAdsPlatform')
+
+  pool.query(`SELECT name FROM ads_platform WHERE status = true ORDER by id DESC`).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+})
+
+app.post('/getOneAdsPlatform', async (req, res) => {
+  console.log('getOneAdsPlatform')
+
+  pool.query(`SELECT * FROM ads_platform WHERE id = $1`, [req.body.id]).then((result) => {
+
+    return res.status(200).send({ data: result.rows[0], success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+})
+
 app.post('/createChannel', async (req, res) => {
   console.log('createChannel')
   req.body.created = new Date().getTime()
@@ -3282,6 +4782,21 @@ app.post('/updateAds', async (req, res) => {
     console.log(error)
     return res.status(800).send({ success: false })
   })
+
+})
+
+app.post('/updateAds2', async (req, res) => {
+  console.log('updateAds2')
+  req.body.update_date = new Date().getTime()
+  pool.query(`UPDATE nano_ads SET (name, status, updated_date, platform, price, image, video, activity, link, ads_id) = ($1,$2, $3, $5, $6, $7, $8, $9, $10, $11) WHERE id = $4`,
+    [req.body.name, req.body.status, req.body.update_date, req.body.id, req.body.platform, req.body.price, req.body.image, req.body.video, req.body.activity, req.body.link, req.body.ads_id]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ success: false })
+    })
 
 })
 
@@ -3381,6 +4896,24 @@ app.post('/changepassword', (req, res) => {
 
 })
 
+app.post('/subchangepassword', (req, res) => {
+  console.log('change');
+  let uid = req.body.uid
+  let password = req.body.password
+
+  admin.auth().updateUser(uid, { password: password }).then(() => {
+    pool.query("UPDATE sub_company SET password = $2 where id = $1", [uid, password]).then((result) => {
+      console.log('users');
+      return res.status(200).send({ message: 'Change Successfully!' })
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ message: 'Not Ok' })
+    })
+
+  })
+
+})
+
 // Manage Equipment
 app.get('/getEquipmentAll', async (req, res) => {
   console.log('getEquipmentAll')
@@ -3446,13 +4979,12 @@ app.post('/getSales', (req, res) => {
   pool.query(`SELECT s.*, na.assigned_to4::JSONB,
   (SELECT JSON_AGG(JSON_BUILD_OBJECT('se_name', user_name, 'se_phone', user_phone_no, 'se_email', user_email)) 
   FROM nano_user WHERE uid IN (select jsonb_array_elements_text(assigned_to4::jsonb) FROM nano_appointment WHERE id = $1)) as se_data,
-  CASE 
-  WHEN COUNT(nsd.id) > 0 THEN 
+  CASE WHEN COUNT(nsd.id) > 0 THEN 
  (SELECT JSON_AGG(JSON_BUILD_OBJECT('photo',nsd.photo, 'sales_discount_id', nsd.id, 'name', nsd.name, 'percentage', nsd.percentage, 'type', nsd.type)) 
   FROM nano_sales ns2 LEFT JOIN nano_sales_discount nsd ON ns2.id = nsd.sales_id WHERE ns2.id = s.id)
-  ELSE null
-  END AS photo_from_discount_table, 
-  b.id as promocode_id, b.name as promocode_name, b.percentage as promocode_percentage
+  ELSE null END AS photo_from_discount_table, 
+  b.id as promocode_id, b.name as promocode_name, b.percentage as promocode_percentage,
+  (SELECT JSON_AGG(JSON_BUILD_OBJECT('sales_order_form', orderform, 'sof_breakdown', orderform_breakdown, 'created_date' , created_date, 'isvoid', isvoid) ORDER BY created_date DESC) FROM nano_sales_order WHERE appointment_id = $1) as salesorderform_list
   FROM nano_sales s LEFT JOIN nano_promo b ON s.promo_code = b.id LEFT JOIN nano_appointment na ON s.appointment_id = na.id
   LEFT JOIN nano_sales_discount nsd on nsd.sales_id = s.id WHERE appointment_id = $1 GROUP BY s.id, na.assigned_to4::JSONB, b.id`, [req.body.appointment_id]).then((result) => {
 
@@ -3504,16 +5036,33 @@ app.get('/getEmptySubChoice', (req, res) => {
 app.post('/getSalesPackageViaAppointment', (req, res) => {
   console.log('getSalesPackageViaAppointment')
   pool.query(`SELECT nsl.*, ns.name, ns.type,
+  
   (SELECT JSON_AGG(JSON_BUILD_OBJECT('dis_id', c.dis_id, 'dis_name' ,c.dis_name, 'dis_remark', c.dis_remark, 'dis_percentage', 
      c.dis_percentage, 'need_photo', c.need_photo, 'photo', c.photo, 'sales_package_id', 
      c.sales_package_id, 'dis_type', c.dis_type) ORDER BY c.dis_type DESC, c.dis_id) 
-   FROM nano_sales_package_discount c  WHERE c.sales_package_id = nsl.sap_id) as dis_items,
+   FROM nano_sales_package_discount c WHERE c.sales_package_id = nsl.sap_id AND c.status) as dis_items,
+
    (SELECT JSON_AGG(JSON_BUILD_OBJECT('dis_id', nsd.id, 'dis_name' ,nsd.name, 'dis_remark', nsd.remark, 'dis_percentage', 
    nsd.percentage, 'need_photo', nsd.need_photo, 'photo', nsd.photo, 'sales_id', 
    nsd.sales_id, 'dis_type', nsd.type, 'discount_id', nsd.discount_id) ORDER BY nsd.type DESC, nsd.id) 
  FROM nano_sales_discount nsd WHERE nsd.sales_id = (SELECT id FROM nano_sales WHERE appointment_id = $1 )) as dis_items2
+
    FROM nano_sales_package nsl LEFT JOIN nano_packages ns ON nsl.package_id = ns.id
    WHERE sales_id = (SELECT id FROM nano_sales WHERE appointment_id = $1 )  `, [req.body.appointment_id]).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
+app.post('/getAllPackageDiscount', (req, res) => {
+  console.log('getSalesPackageViaAppointment')
+  pool.query(`SELECT d1.* FROM nano_sales_package nsp LEFT JOIN nano_sales_package_discount d1 ON d1.sales_package_id = nsp.sap_id AND d1.status = true
+   WHERE sales_id = (SELECT id FROM nano_sales WHERE appointment_id = $1 )`, [req.body.appointment_id]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -3623,6 +5172,52 @@ app.post('/updateTask4', (req, res) => {
   })
 
 })
+
+app.post('/updateMaintenanceTask', (req, res) => {
+  console.log('updateMaintenanceTask');
+  pool.query(`UPDATE nano_sales_package nsp SET 
+    from_date4 = p.from_date4::json, 
+    maintain_status = p.maintain_status
+    FROM (
+      SELECT 
+        (r.value->>'from_date4') AS from_date4,
+        (r.value->>'sap_id')::int AS sap_id,
+        (r.value->>'maintain_status') AS maintain_status
+      FROM JSON_ARRAY_ELEMENTS($1::JSON) r
+    ) p
+    WHERE nsp.sap_id = p.sap_id
+  `, [req.body.task])
+    .then((result) => {
+      return res.status(200).send({ success: true });
+    })
+    .catch((error) => {
+      console.log(error);
+      return res.status(800).send({ success: false });
+    });
+});
+
+app.post('/updateSubMaintenanceTask', (req, res) => {
+  console.log('updateSubMaintenanceTask');
+  pool.query(`UPDATE nano_sales_package nsp SET 
+    from_date4 = p.from_date4::json, 
+    maintain_status = p.maintain_status
+    FROM (
+      SELECT 
+        (r.value->>'from_date4') AS from_date4,
+        (r.value->>'sap_id')::int AS sap_id,
+        (r.value->>'maintain_status') AS maintain_status
+      FROM JSON_ARRAY_ELEMENTS($1::JSON) r
+    ) p
+    WHERE nsp.sap_id = p.sap_id
+  `, [req.body.task])
+    .then((result) => {
+      return res.status(200).send({ success: true });
+    })
+    .catch((error) => {
+      console.log(error);
+      return res.status(800).send({ success: false });
+    });
+});
 
 //Payment
 app.post('/getSalesPayment', (req, res) => {
@@ -3800,9 +5395,9 @@ app.post('/createSalesPackages', (req, res) => {
 
   let datenow = new Date().getTime()
   pool.query(`INSERT INTO nano_packages (name, service, type, amount, status, created_at, min_sqft, max_sqft,
-     sqft, area, job_type) VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, $10)`,
+     sqft, area, job_type, maintenance, maintain_amount, maintain_date ) VALUES ($1, $2, $3, $4, true, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
     [req.body.package_name, req.body.service, req.body.type, req.body.amount, datenow, req.body.min_sqft,
-    req.body.max_sqft, req.body.sqft, req.body.area, req.body.job_type]).then((result) => {
+    req.body.max_sqft, req.body.sqft, req.body.area, req.body.job_type, req.body.maintenance, req.body.maintain_amount, req.body.maintain_date]).then((result) => {
 
       return res.status(200).send({ success: true })
 
@@ -3833,10 +5428,10 @@ app.post('/getSpecificSalesPackages', (req, res) => {
 app.post('/updatePackages', (req, res) => {
   console.log('updatePackages');
 
-  pool.query(`UPDATE nano_packages SET(name, service, type, amount, min_sqft, max_sqft, sqft, area, status, job_type) = ($1, $2, $3, $4, $5, $6,
-     $7, $8, $9, $10) WHERE id = $11`,
+  pool.query(`UPDATE nano_packages SET(name, service, type, amount, min_sqft, max_sqft, sqft, area, status, job_type, maintenance, maintain_amount, maintain_date) = ($1, $2, $3, $4, $5, $6,
+     $7, $8, $9, $10, $12, $13, $14) WHERE id = $11`,
     [req.body.package_name, req.body.service, req.body.type, req.body.amount, req.body.min_sqft, req.body.max_sqft, req.body.sqft, req.body.area,
-    req.body.status, req.body.job_type, req.body.package_id]).then((result) => {
+    req.body.status, req.body.job_type, req.body.package_id, req.body.maintenance, req.body.maintain_amount, req.body.maintain_date]).then((result) => {
 
       return res.status(200).send({ success: true })
 
@@ -4159,6 +5754,7 @@ app.post('/getAllScheduleByUid', (req, res) => {
 app.post('/getAllScheduleBySales', (req, res) => {
   console.log('getAllScheduleBySales');
 
+  // pool.query(`SELECT * FROM nano_schedule WHERE sales_id = $1 AND status = true`, [req.body.sales_id]).then((result) => {
   pool.query(`SELECT * FROM nano_schedule WHERE sales_id = $1 AND status = true`, [req.body.sales_id]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
@@ -4202,8 +5798,98 @@ app.post('/getScheduleByDate', (req, res) => {
 
 })
 
+app.post('/getScheduleByDateApp', (req, res) => {
+  console.log('getScheduleByDateApp');
+
+  pool.query(`SELECT a.*, c.customer_name, c.customer_phone, c.address, b.subcon_state, b.lead_id,
+  (na.assigned_to4::text) as user_uid,
+
+  (SELECT JSON_AGG(user_name)
+  FROM nano_user
+  WHERE uid IN (
+      SELECT jsonb_array_elements_text(assigned_to4::jsonb)
+      FROM nano_appointment WHERE id = (SELECT appointment_id FROM nano_sales ns WHERE ns.id = b.id)
+  ))  AS assign_se,
+
+  (SELECT JSON_AGG(user_name) 
+            FROM nano_user 
+            WHERE uid IN (SELECT value::text 
+                           FROM JSONB_ARRAY_ELEMENTS_TEXT(na.assigned_to4::JSONB))) AS user_name
+  FROM nano_schedule a 
+  LEFT JOIN nano_sales b ON a.sales_id = b.id 
+  LEFT JOIN nano_leads c ON b.lead_id = c.id 
+  LEFT JOIN nano_appointment na ON na.id = (SELECT appointment_id FROM nano_sales ns WHERE ns.id = b.id)
+  WHERE a.schedule_date >= $1 AND a.schedule_date <= $2 AND a.status = true ORDER BY a.created_date DESC`, [req.body.minimum, req.body.maximum]).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
 app.post('/getScheduleByDatePM', (req, res) => {
   console.log('getScheduleByDatePM');
+
+  const query = `
+    SELECT a.*, 
+      c.customer_name, 
+      c.customer_phone, 
+      c.address, 
+      b.subcon_state, 
+      b.lead_id,
+      COALESCE(
+        (SELECT JSON_AGG(nu.user_name)
+         FROM nano_user nu
+         WHERE nu.uid IN (
+           SELECT jsonb_array_elements_text(na.assigned_to4::jsonb)
+           FROM nano_appointment na
+           WHERE na.id = (
+             SELECT appointment_id 
+             FROM nano_sales ns 
+             WHERE ns.id = b.id
+           )
+         )
+        ), '[]') AS assign_se,
+      COALESCE(
+        (SELECT JSON_AGG(nu.user_name)
+         FROM nano_user nu
+         WHERE nu.uid IN (
+           SELECT jsonb_array_elements_text(na.assigned_to4::jsonb)
+         )
+        ), '[]') AS user_name
+    FROM nano_schedule a
+    LEFT JOIN nano_sales b ON a.sales_id = b.id
+    LEFT JOIN nano_leads c ON b.lead_id = c.id
+    LEFT JOIN nano_appointment na ON na.id = (
+      SELECT appointment_id 
+      FROM nano_sales ns 
+      WHERE ns.id = b.id
+    )
+    WHERE 
+      b.subcon_state IS NULL
+      AND a.schedule_date >= $1
+      AND a.schedule_date <= $2
+      AND a.status = true
+      AND b.pending_subcon = $3::text
+    ORDER BY a.created_date DESC;
+  `;
+
+  pool.query(query, [req.body.minimum, req.body.maximum, req.body.company])
+    .then((result) => {
+      return res.status(200).send({ data: result.rows, success: true });
+    })
+    .catch((error) => {
+      console.error(error);
+      return res.status(800).send({ success: false });
+    });
+});
+
+
+app.post('/getScheduleByDatePA', (req, res) => {
+  console.log('getScheduleByDatePA');
 
   pool.query(`SELECT a.*, c.customer_name, c.customer_phone, c.address, b.subcon_state, b.lead_id,
 
@@ -4222,7 +5908,7 @@ app.post('/getScheduleByDatePM', (req, res) => {
   LEFT JOIN nano_sales b ON a.sales_id = b.id 
   LEFT JOIN nano_leads c ON b.lead_id = c.id 
   LEFT JOIN nano_appointment na ON na.id = (SELECT appointment_id FROM nano_sales ns WHERE ns.id = b.id)
-  WHERE b.subcon_state IS NULL AND a.schedule_date >= $1 AND a.schedule_date <= $2 AND a.status = true AND b.pending_subcon = $3::text ORDER BY a.created_date DESC`, [req.body.minimum, req.body.maximum, req.body.company]).then((result) => {
+  WHERE b.subcon_state IS NULL AND a.schedule_date >= $1 AND a.schedule_date <= $2 AND a.status = true AND $3::text IS NOT NULL ORDER BY a.created_date DESC`, [req.body.minimum, req.body.maximum, req.body.company]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -4239,6 +5925,25 @@ app.post('/getScheduleByDateForList', (req, res) => {
   pool.query(`SELECT a.schedule_date,a.sales_id
   FROM nano_schedule a LEFT JOIN nano_sales b ON a.sales_id = b.id LEFT JOIN nano_leads c ON b.lead_id = c.id 
   WHERE b.subcon_state IS NULL AND a.schedule_date >= $1 AND a.schedule_date <= $2 AND a.status = true ORDER BY a.created_date DESC`, [req.body.minimum, req.body.maximum]).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
+app.post('/getScheduleByDateForListApp', (req, res) => {
+  console.log('getScheduleByDateForListApp');
+
+  pool.query(`SELECT a.schedule_date, a.sales_id, (na.assigned_to4::text) as user_uid
+  FROM nano_schedule a 
+  LEFT JOIN nano_sales b ON a.sales_id = b.id 
+  LEFT JOIN nano_leads c ON b.lead_id = c.id 
+  LEFT JOIN nano_appointment na ON na.id = b.appointment_id
+  WHERE a.schedule_date >= $1 AND a.schedule_date <= $2 AND a.status = true ORDER BY a.created_date DESC`, [req.body.minimum, req.body.maximum]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -4282,6 +5987,23 @@ app.post('/getScheduleByDateForListPM', (req, res) => {
 
 })
 
+app.post('/getScheduleByDateForListPA', (req, res) => {
+  console.log('getScheduleByDateForListPA');
+
+  pool.query(`SELECT a.schedule_date,a.sales_id
+  FROM nano_schedule a LEFT JOIN nano_sales b ON a.sales_id = b.id LEFT JOIN nano_leads c ON b.lead_id = c.id 
+  WHERE b.subcon_state IS NULL AND a.schedule_date >= $1 AND a.schedule_date <= $2 AND a.status = true AND b.subcon_state IS NOT NULL AND $3::text IS NOT NULL AND b.final_approval = true
+  ORDER BY a.created_date DESC`, [req.body.minimum, req.body.maximum, req.body.company]).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
 app.post('/getFromDateByDate', (req, res) => {
   console.log('getFromDateByDate');
 
@@ -4314,68 +6036,157 @@ app.post('/getFromDateByDate', (req, res) => {
 app.post('/getFromDateByDate2', (req, res) => {
   console.log('getFromDateByDate2');
 
-  pool.query(`WITH act1 AS (
-    SELECT nsp.*, b.subcon_state, b.lead_id, nsp.from_date as schedule_date,
-    nsp.from_date2 as schedule_date2, json_agg(ns.remark) as remark2, ns.created_by, ns.id,
-    c.customer_name, c.customer_phone, c.address, c.customer_name, b.final_approval,
-    (na.assigned_to4::text) as user_uid,
-    
-    (SELECT JSON_AGG(user_name)
-  FROM nano_user
-  WHERE uid IN (
-      SELECT jsonb_array_elements_text(assigned_to4::jsonb)
-      FROM nano_appointment WHERE id = (SELECT appointment_id FROM nano_sales ns WHERE ns.id = b.id)
-  ))  AS assign_se
-
+  pool.query(`
+  WITH act1 AS (
+    SELECT nsp.*, b.subcon_state, b.lead_id, nsp.from_date as schedule_date, ns.schedule_date as schedule_real, nsp.from_date2 as schedule_date2, JSON_AGG(ns.remark) as remark2, ns.created_by, ns.id, ns.status as schedule_status, c.customer_name, c.customer_phone, c.address, b.final_approval, (na.assigned_to4::text) as user_uid,
+    (SELECT JSON_AGG(user_name) FROM nano_user WHERE uid IN (SELECT jsonb_array_elements_text(assigned_to4::jsonb) FROM nano_appointment WHERE id = (SELECT appointment_id FROM nano_sales ns WHERE ns.id = b.id))) AS assign_se,
+    b.assigned_worker
     FROM nano_sales_package nsp 
     LEFT JOIN nano_sales b ON nsp.sales_id = b.id 
     LEFT JOIN nano_leads c ON b.lead_id = c.id 
     LEFT JOIN nano_schedule ns ON ns.sales_id = nsp.sales_id 
     LEFT JOIN nano_appointment na ON na.id = (SELECT appointment_id FROM nano_sales ns WHERE ns.id = nsp.sales_id)
-    GROUP BY nsp.sap_id, b.subcon_state, b.lead_id, c.customer_name, c.customer_phone, c.address, b.final_approval, ns.id, ns.created_by, na.assigned_to4::text, b.id
-  ), 
+    GROUP BY nsp.sap_id, b.subcon_state, b.lead_id, c.customer_name, c.customer_phone, c.address, b.final_approval, ns.id, ns.created_by, na.assigned_to4::text, b.id, ns.status, ns.schedule_date
+  ),
   act2 AS (
-    SELECT a.*,
-    (SELECT JSON_AGG(user_name) 
-      FROM nano_user 
-      WHERE uid IN (SELECT value::text 
-      FROM JSONB_ARRAY_ELEMENTS_TEXT(a.user_uid::JSONB))) AS user_name
+    SELECT a.*, (
+      SELECT JSON_AGG(JSON_BUILD_OBJECT('uid', w.value ->> 'uid', 'user_name', u.user_name, 'role', w.value ->> 'role'))
+      FROM JSONB_ARRAY_ELEMENTS(a.assigned_worker::jsonb) w
+      LEFT JOIN nano_user u ON u.uid = w.value ->> 'uid'
+    ) AS assigned_worker_info,
+    (SELECT JSON_AGG(user_name) FROM nano_user WHERE uid IN (SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(a.user_uid::JSONB))) AS user_name
     FROM act1 a
   )
-  SELECT * 
-    FROM act2 
-    WHERE EXISTS (
-      SELECT 1 
-      FROM jsonb_array_elements_text(act2.schedule_date2::jsonb) AS date 
-      WHERE date::bigint >= $1 AND date::bigint <= $2
-    )
-  `, [req.body.minimum, req.body.maximum]).then((result) => {
-    // (nsp.from_date >= $1 AND nsp.from_date <= $2))
-    return res.status(200).send({ data: result.rows, success: true })
+  SELECT * FROM act2 
+  WHERE EXISTS (
+    SELECT 1 FROM jsonb_array_elements_text(act2.schedule_date2::jsonb) AS date 
+    WHERE date::bigint >= $1 AND date::bigint <= $2
+  )`, [req.body.minimum, req.body.maximum])
+    .then((result) => {
+      return res.status(200).send({ data: result.rows, success: true });
+    })
+    .catch((error) => {
+      console.log(error);
+      return res.status(800).send({ success: false });
+    });
+});
 
-  }).catch((error) => {
-    console.log(error)
-    return res.status(800).send({ success: false })
-  })
 
-})
 
 app.post('/getFromDateByDatePM', (req, res) => {
   console.log('getFromDateByDatePM');
+
+  const query = `
+    WITH act1 AS (
+      SELECT 
+        nsp.*, 
+        b.subcon_state, 
+        b.lead_id, 
+        nsp.from_date AS schedule_date,
+        nsp.from_date2 AS schedule_date2, 
+        JSON_AGG(ns.remark) AS remark2, 
+        c.customer_name, 
+        c.customer_phone, 
+        c.address, 
+        b.final_approval, 
+        b.pending_subcon, 
+        b.sub_cust_sign AS sales_cust_sign, 
+        sf.*,
+        na.assigned_to4::text AS user_uid, 
+        c.id AS lead_id2, 
+        b.is_postpone, 
+        JSON_AGG(
+          DISTINCT jsonb_build_object('uid', aw.uid, 'role', aw.role, 'name', su.user_name)
+        ) AS assigned_worker
+      FROM 
+        nano_sales_package nsp
+      LEFT JOIN 
+        nano_sales b ON nsp.sales_id = b.id 
+      LEFT JOIN 
+        nano_leads c ON b.lead_id = c.id 
+      LEFT JOIN 
+        nano_schedule ns ON ns.sales_id = nsp.sales_id 
+      LEFT JOIN 
+        nano_appointment na ON na.id = (
+          SELECT appointment_id 
+          FROM nano_sales ns 
+          WHERE ns.id = nsp.sales_id
+        )
+      LEFT JOIN 
+        subcon_service_form sf ON sf.sales_id = nsp.sales_id
+      LEFT JOIN 
+        LATERAL (
+          SELECT aw->>'uid' AS uid, aw->>'role' AS role
+          FROM jsonb_array_elements(COALESCE(b.assigned_worker::jsonb, '[]'::jsonb)) AS aw
+          WHERE aw->>'uid' IS NOT NULL
+        ) aw ON TRUE
+      LEFT JOIN 
+        sub_user su ON su.uid = aw.uid
+      GROUP BY 
+        nsp.sap_id, b.subcon_state, b.lead_id, c.customer_name, c.customer_phone, 
+        c.address, b.final_approval, b.pending_subcon, b.sub_cust_sign, 
+        sf.id, na.assigned_to4::text, c.id, b.is_postpone
+    ), 
+    act2 AS (
+      SELECT 
+        a.*,
+        (SELECT JSON_AGG(user_name) 
+         FROM nano_user 
+         WHERE uid IN (
+           SELECT value::text 
+           FROM JSONB_ARRAY_ELEMENTS_TEXT(a.user_uid::JSONB)
+         )
+        ) AS user_name
+      FROM act1 a
+    )
+    SELECT * 
+    FROM act2 
+    WHERE 
+      EXISTS (
+        SELECT 1 
+        FROM jsonb_array_elements_text(act2.schedule_date2::jsonb) AS date 
+        WHERE date::bigint >= $1 AND date::bigint <= $2
+      )
+      AND act2.pending_subcon = $3
+    ORDER BY schedule_date DESC
+  `;
+
+  pool.query(query, [req.body.minimum, req.body.maximum, req.body.company])
+    .then((result) => {
+      return res.status(200).send({ data: result.rows, success: true });
+    })
+    .catch((error) => {
+      console.error(error);
+      return res.status(800).send({ success: false });
+    });
+});
+
+
+app.post('/getFromDateByDatePA', (req, res) => {
+  console.log('getFromDateByDatePA');
 
   pool.query(`WITH act1 AS (
     SELECT nsp.*, b.subcon_state, b.lead_id, nsp.from_date as schedule_date,
     nsp.from_date2 as schedule_date2, json_agg(ns.remark) as remark2, 
     c.customer_name, c.customer_phone, c.address, c.customer_name, b.final_approval, b.pending_subcon, b.sub_cust_sign as sales_cust_sign, sf.*,
-    (na.assigned_to4::text) as user_uid, c.id as lead_id2
+    (na.assigned_to4::text) as user_uid, c.id as lead_id2, b.is_postpone, JSON_AGG(DISTINCT jsonb_build_object('uid', aw.uid, 'role', aw.role, 'name', su.user_name)) AS assigned_worker
     FROM nano_sales_package nsp 
     LEFT JOIN nano_sales b ON nsp.sales_id = b.id 
     LEFT JOIN nano_leads c ON b.lead_id = c.id 
     LEFT JOIN nano_schedule ns ON ns.sales_id = nsp.sales_id 
     LEFT JOIN nano_appointment na ON na.id = (SELECT appointment_id FROM nano_sales ns WHERE ns.id = nsp.sales_id)
     LEFT JOIN subcon_service_form sf ON sf.sales_id = nsp.sales_id
-    GROUP BY nsp.sap_id, b.subcon_state, b.lead_id, c.customer_name, c.customer_phone, c.address, b.final_approval, b.pending_subcon, b.sub_cust_sign, sf.id, na.assigned_to4::text, c.id
-  ), 
+    LEFT JOIN 
+LATERAL (
+  SELECT aw->>'uid' AS uid, aw->>'role' AS role
+  FROM jsonb_array_elements(COALESCE(b.assigned_worker::jsonb, '[]'::jsonb)) AS aw
+  WHERE aw->>'uid' IS NOT NULL
+) aw ON TRUE
+LEFT JOIN sub_user su ON su.uid = aw.uid
+WHERE b.final_approval = true
+    GROUP BY nsp.sap_id, b.subcon_state, b.lead_id, c.customer_name, c.customer_phone, c.address, b.final_approval, b.pending_subcon, b.sub_cust_sign, sf.id,
+     na.assigned_to4::text, c.id, b.is_postpone
+  ) , 
   act2 AS (
     SELECT a.*,
     (SELECT JSON_AGG(user_name) 
@@ -4390,8 +6201,7 @@ app.post('/getFromDateByDatePM', (req, res) => {
       SELECT 1 
       FROM jsonb_array_elements_text(act2.schedule_date2::jsonb) AS date 
       WHERE date::bigint >= $1 AND date::bigint <= $2
-    )
-    AND act2.pending_subcon = $3
+    ) AND $3::text IS NOT NULL
   `, [req.body.minimum, req.body.maximum, req.body.company]).then((result) => {
     // (nsp.from_date >= $1 AND nsp.from_date <= $2))
     return res.status(200).send({ data: result.rows, success: true })
@@ -4457,11 +6267,29 @@ app.post('/getFromDateByDateForListPM', (req, res) => {
 
 })
 
+app.post('/getFromDateByDateForListPA', (req, res) => {
+  console.log('getFromDateByDateForListPA');
+
+  pool.query(`SELECT nsp.sales_id, nsp.from_date as schedule_date, nsp.from_date2 as schedule_date2
+  FROM nano_sales_package nsp LEFT JOIN nano_sales b ON (nsp.sales_id = b.id AND b.subcon_state IS NOT NULL) LEFT JOIN nano_leads c ON b.lead_id = c.id  
+  WHERE ((nsp.from_date IS NOT NULL AND (nsp.from_date >= $1 AND nsp.from_date <= $2) AND b.final_approval = true) 
+  OR (EXISTS(SELECT 1 FROM jsonb_array_elements_text(nsp.from_date2::jsonb) AS time WHERE time::bigint >= $1::bigint AND time::bigint <= $2::bigint))) AND b.subcon_state IS NOT NULL
+  AND $3::text IS NOT NULL`, [req.body.minimum, req.body.maximum, req.body.company]).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
 app.post('/getFromDateBySearch', (req, res) => {
   console.log('getFromDateBySearch');
 
   pool.query(`SELECT nsp.*, nsp.from_date as schedule_date, nsp.from_date2 as schedule_date2, c.customer_name, c.customer_phone, c.address, b.subcon_state FROM nano_sales_package nsp LEFT JOIN nano_sales b ON nsp.sales_id = b.id LEFT JOIN nano_leads c ON b.lead_id = c.id  
-  WHERE (nsp.from_date IS NOT NULL OR nsp.from_date2::text != '[]') AND (LOWER(customer_name) LIKE $1 OR LOWER(customer_phone) LIKE $1)
+  WHERE (nsp.from_date IS NOT NULL OR nsp.from_date2::text != '[]') AND (LOWER(customer_name) ILIKE $1 OR LOWER(customer_phone) ILIKE $1)
   `, ['%' + req.body.keyword + '%']).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
@@ -4478,7 +6306,7 @@ app.post('/getScheduleBySearch', (req, res) => {
 
   pool.query(`SELECT a.*, c.customer_name, c.customer_phone, c.address, b.subcon_state
   FROM nano_schedule a LEFT JOIN nano_sales b ON a.sales_id = b.id LEFT JOIN nano_leads c ON b.lead_id = c.id 
-  WHERE b.subcon_state IS NULL AND a.status = true AND (LOWER(customer_name) LIKE $1 OR LOWER(customer_phone) LIKE $1) ORDER BY a.created_date DESC`, ['%' + req.body.keyword + '%']).then((result) => {
+  WHERE b.subcon_state IS NULL AND a.status = true AND (LOWER(customer_name) ILIKE $1 OR LOWER(customer_phone) ILIKE $1) ORDER BY a.created_date DESC`, ['%' + req.body.keyword + '%']).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -4530,6 +6358,33 @@ app.post('/createSchedule2', (req, res) => {
   VALUES($6, $7, $1, $8, $5, $9, $10))
   SELECT * FROM insertschedule`,
       [req.body.sales_id, req.body.schedule_date, req.body.created_date, req.body.remark, req.body.uid, req.body.leadid, req.body.aid, req.body.createdDate, 'Schedule Created by ' + by, 'Schedule', req.body.kiv]).then((result) => {
+
+        return res.status(200).send({ success: true })
+
+      }).catch((error) => {
+        console.log(error)
+        return res.status(800).send({ error: error.message, success: false })
+      })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ error: error.message, success: false })
+  })
+
+})
+
+app.post('/createSchedule3', (req, res) => {
+  console.log('createSchedule3');
+  req.body.createdDate = new Date().getTime()
+  pool.query(`
+  SELECT user_name FROM nano_user WHERE uid = $1
+`, [req.body.uid]).then((result) => {
+    let by = result.rows[0]['user_name']
+    pool.query(`WITH insertschedule as (INSERT INTO nano_schedule(sales_id, schedule_date, created_date, status, remark, created_by, approve_status, schedule_kiv, is_maintain) VALUES($1, $2, $3,true, $4, $5, null, $11, $12) RETURNING id),
+  insertactivitylog as (INSERT INTO nano_activity_log (lead_id, appointment_id, sales_id, activity_time, activity_by, remark, activity_type) 
+  VALUES($6, $7, $1, $8, $5, $9, $10))
+  SELECT * FROM insertschedule`,
+      [req.body.sales_id, req.body.schedule_date, req.body.created_date, req.body.remark, req.body.uid, req.body.leadid, req.body.aid, req.body.createdDate, 'Schedule Created by ' + by, 'Schedule', req.body.kiv, req.body.is_maintain]).then((result) => {
 
         return res.status(200).send({ success: true })
 
@@ -4725,6 +6580,19 @@ app.post('/checkPaymentLog', (req, res) => {
 
 })
 
+app.post('/checkPaymentLogId', (req, res) => {
+  console.log('checkPaymentLogId');
+
+  pool.query(`SELECT * FROM nano_payment_log WHERE id = $1`, [req.body.id]).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
 
 //  JSON_AGG(json_build_object('check_id', nc.no, 'check_lat', nc.check_lat, 'check_long', nc.check_long, 'check_time', nc.check_time, 'check_address', nc.check_address, 'check_remark', nc.check_remark, 'check_status', nc.check_status))
 
@@ -4768,7 +6636,7 @@ app.post('/getAppointmentDetails2', (req, res) => {
        (SELECT JSON_AGG(json_build_object('check_id', nc.no, 'check_lat', nc.check_lat, 'check_long', nc.check_long, 'check_time', nc.check_time, 'check_address', nc.check_address,
         'check_remark', nc.check_remark, 'check_status', nc.check_status)) as check_detail FROM nano_check nc WHERE nc.appointment_id = $1 AND nc.status = true),
     
-        (SELECT JSON_AGG(JSON_BUILD_OBJECT('sales_order_form', orderform, 'created_date' , created_date, 'isvoid', isvoid) ORDER BY created_date DESC) FROM nano_sales_order WHERE appointment_id = $1) as salesorderform_list,
+        (SELECT JSON_AGG(JSON_BUILD_OBJECT('sales_order_form', orderform, 'sof_breakdown', orderform_breakdown, 'created_date' , created_date, 'isvoid', isvoid) ORDER BY created_date DESC) FROM nano_sales_order WHERE appointment_id = $1) as salesorderform_list,
     
         (SELECT JSON_AGG(JSON_BUILD_OBJECT('from_date', nsch.schedule_date)) FROM nano_schedule nsch WHERE nsch.sales_id = ns.id) as installation_date
        
@@ -4816,7 +6684,7 @@ app.post('/getAppointmentDetails2', (req, res) => {
        (SELECT JSON_AGG(json_build_object('check_id', nc.no, 'check_lat', nc.check_lat, 'check_long', nc.check_long, 'check_time', nc.check_time, 'check_address', nc.check_address,
         'check_remark', nc.check_remark, 'check_status', nc.check_status)) as check_detail FROM nano_check nc WHERE nc.appointment_id = $1 AND nc.status = true),
     
-        (SELECT JSON_AGG(JSON_BUILD_OBJECT('sales_order_form', orderform, 'created_date' , created_date, 'isvoid', isvoid) ORDER BY created_date DESC) FROM nano_sales_order WHERE appointment_id = $1) as salesorderform_list,
+        (SELECT JSON_AGG(JSON_BUILD_OBJECT('sales_order_form', orderform, 'sof_breakdown', orderform_breakdown, 'created_date' , created_date, 'isvoid', isvoid) ORDER BY created_date DESC) FROM nano_sales_order WHERE appointment_id = $1) as salesorderform_list,
     
         (SELECT JSON_AGG(JSON_BUILD_OBJECT('from_date', nsp.from_date)) FROM nano_sales_package nsp WHERE nsp.sales_id = ns.id) as installation_date
        
@@ -4850,11 +6718,26 @@ app.post('/getAppointmentDetails', (req, res) => {
   pool.query(`SELECT a.id AS appointment_id, a.bypass, a.kiv, a.appointment_time,a.checkin_latt, a.checkin_long, a.appointment_status, l.warranty_id, nw.linked_lead , a.checkin 
       AS checkin_time, l.id AS lead_id, l.label_s, l.label_m, nl.name as label_s_name, nl2.name as label_m_name, a.checkin_img,  l.*,  ns.id AS sales_id, l.ads_id, l.channel_id, l.customer_signature, ns.total, ns.payment_status, ns.sales_status, ns.status as whole_status, ns.gen_quotation, ns.custom_quotation,
       s2.id AS warranty_sales_id, ns.sub_total, nw.*,
-       ns.discount_applied, ns.discount_image,  ns.scaff_height,  ns.scaff_fee,  ns.skylift_height,  ns.skylift_fee, ns.transportation_fee, ns.quotation_request, ns.warranty, ns.quote_no,
+       ns.discount_applied, ns.discount_image,  ns.scaff_height,  ns.scaff_fee,  ns.skylift_height,  ns.skylift_fee, ns.transportation_fee, ns.quotation_request, ns.warranty, ns.quote_no, ns.price_breakdown,
        ns.working_duration, npo.name AS promo_name, npo.percentage AS promo_percent, npo.id AS promo_id,
+
+       (
+        SELECT json_build_object(
+            'sp_approval_status', sp_approval_status, 
+            'sp_leader_approve', sp_leader_approve, 
+            'sp_leader_name', sp_leader_name, 
+            'sp_paul_approve', sp_paul_approve
+        )
+        FROM nano_payment_log 
+        WHERE sales_id = ns.id 
+        AND sp_approval_status = true 
+        ORDER BY payment_date DESC 
+        LIMIT 1
+    ) AS latest_payment_status,
     
       (     SELECT JSON_AGG(json_build_object('sap_id',sap_id,'name', np.name, 'area', nsl.area, 'remark', nsl.remark, 'services', nsl.services, 'sqft', nsl.sqft, 'size', nsl.size, 'rate', nsl.rate,
-      'other_area', nsl.other_area, 'sub_total', nsl.sub_total, 'total', nsl.total, 'discount', nsl.discount, 'addon_id' , nsl.addon_id, 'total_after', nsl.total_after,  'warranty', nsl.package_warranty, 'discounts', 
+      'other_area', nsl.other_area, 'sub_total', nsl.sub_total, 'total', nsl.total, 'discount', nsl.discount, 'addon_id' , nsl.addon_id, 'total_after', nsl.total_after,  'warranty', nsl.package_warranty,
+      'package_details', nsl.package_details, 'maintain_exist', nsl.maintain_exist, 'maintain_confirm', nsl.maintain_confirm, 'maintain_date', nsl.maintain_date, 'discounts',
     (SELECT JSON_AGG(JSON_BUILD_OBJECT('dis_id', c.dis_id, 'dis_name' ,c.dis_name, 'dis_remark', c.dis_remark, 'dis_percentage', 
       c.dis_percentage, 'need_photo', c.need_photo, 'photo', c.photo, 'sales_package_id', 
       c.sales_package_id, 'dis_type', c.dis_type) ORDER BY c.dis_type DESC, c.dis_id) 
@@ -4878,10 +6761,11 @@ app.post('/getAppointmentDetails', (req, res) => {
        (SELECT JSON_AGG(json_build_object('check_id', nc.no, 'check_lat', nc.check_lat, 'check_long', nc.check_long, 'check_time', nc.check_time, 'check_address', nc.check_address,
         'check_remark', nc.check_remark, 'check_status', nc.check_status) order by nc.no asc) as check_detail FROM nano_check nc WHERE nc.appointment_id = $1 AND nc.status = true),
     
-        (SELECT JSON_AGG(JSON_BUILD_OBJECT('id', id, 'sales_order_form', orderform, 'created_date' , created_date, 'isvoid', isvoid) ORDER BY created_date DESC) FROM nano_sales_order WHERE appointment_id = $1) as salesorderform_list,
+        (SELECT JSON_AGG(JSON_BUILD_OBJECT('id', id, 'sales_order_form', orderform, 'sof_breakdown', orderform_breakdown, 'created_date' , created_date, 'isvoid', isvoid) ORDER BY created_date DESC) FROM nano_sales_order WHERE appointment_id = $1) as salesorderform_list,
 
-        (SELECT JSON_AGG(JSON_BUILD_OBJECT('from_date', nsch.schedule_date)) FROM nano_schedule nsch WHERE nsch.sales_id = ns.id AND nsch.status = true) as installation_date
-       
+        (SELECT JSON_AGG(JSON_BUILD_OBJECT('from_date', nsch.schedule_date)) FROM nano_schedule nsch WHERE nsch.sales_id = ns.id AND nsch.status = true) as installation_date,
+        ( SELECT JSON_AGG(user_name) FROM nano_user WHERE uid IN ( SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(a.assigned_to4::JSONB))) AS user_name
+    
         FROM nano_appointment a LEFT JOIN nano_leads l ON a.lead_id = l.id LEFT JOIN nano_warranty nw ON l.warranty_id = nw.id LEFT JOIN nano_sales s2 ON nw.linked_lead = s2.lead_id 
         LEFT JOIN nano_sales ns ON a.id = ns.appointment_id LEFT JOIN nano_promo npo ON ns.promo_code = npo.id
         LEFT JOIN nano_label nl ON nl.id = l.label_s LEFT JOIN nano_label nl2 ON nl2.id = l.label_m WHERE a.id = $1
@@ -5383,14 +7267,30 @@ app.post('/getSalesPackage', (req, res) => {
 app.post('/getSalesPackagev2', (req, res) => {
   console.log('getSalesPackagev2')
 
-  pool.query(`  SELECT nsl.*, nsl.sub_total AS subtotal, nsl.pu_status,
-  nl.label_photo, nl.label_video, 
+  pool.query(`SELECT nsl.*, 
+  nsl.sub_total AS subtotal, 
+  nsl.pu_status,
+  nl.label_photo, 
+  nl.label_video, 
   (SELECT jsonb_agg(check_img::jsonb)
-   FROM nano_check WHERE appointment_id = na.id AND check_status = 'in') as check_in_photo
-   FROM nano_sales_package nsl
-    LEFT JOIN nano_sales ns ON ns.id = nsl.sales_id 
-  LEFT JOIN nano_leads nl ON ns.lead_id = nl.id 
-  LEFT JOIN nano_appointment na ON nl.id = na.lead_id WHERE sap_id = $1`, [req.body.sap_id]).then((result) => {
+   FROM nano_check 
+   WHERE appointment_id = na.id AND check_status = 'in') AS check_in_photo,
+  nsc.complaint_remark,
+  nsc.complaint_image,
+  nsc.complaint_video
+FROM nano_sales_package nsl
+LEFT JOIN nano_sales ns ON ns.id = nsl.sales_id 
+LEFT JOIN nano_leads nl ON ns.lead_id = nl.id 
+LEFT JOIN nano_appointment na ON nl.id = na.lead_id 
+LEFT JOIN LATERAL (
+    SELECT nsc.complaint_remark, nsc.complaint_image, nsc.complaint_video
+    FROM nano_sub_complaint nsc
+    WHERE nsc.sales_id = ns.id
+      AND nsc.complaint_id::jsonb @> JSONB_BUILD_ARRAY(JSONB_BUILD_OBJECT('sap_id', nsl.sap_id))
+    ORDER BY nsc.id DESC LIMIT 1
+) nsc ON true
+WHERE nsl.sap_id = $1;
+`, [req.body.sap_id]).then((result) => {
 
     return res.status(200).send({ data: result.rows[0], success: true })
 
@@ -5553,11 +7453,12 @@ app.post('/updateSalesPackagev2', (req, res) => {
   let type = req.body.servicetype
   let now = new Date().getTime()
   pool.query(`UPDATE nano_sales_package SET (width, height, pack_image, pack_video, remark,
-      package_id, area, sub_total, total, discount, services, sqft, size, rate, other_area, discount_roundoff, total_after, package_warranty, pu_status) = 
-     ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $18, $19, $20) WHERE sap_id = $17 RETURNING sales_id`,
+      package_id, area, sub_total, total, discount, services, sqft, size, rate, other_area, discount_roundoff, total_after, package_warranty, pu_status, package_details, maintain_exist) = 
+     ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $18, $19, $20, $21, $22) WHERE sap_id = $17 RETURNING sales_id`,
     [req.body.width, req.body.height, req.body.image, req.body.video, req.body.remark, req.body.package_id, req.body.area,
     req.body.sub_total, req.body.total, req.body.discount, req.body.service, req.body.sqft, req.body.size, req.body.rate,
-    req.body.other_area, req.body.discount_roundoff, req.body.sap_id, req.body.total_after, req.body.package_warranty, req.body.pu_status]).then((result) => {
+    req.body.other_area, req.body.discount_roundoff, req.body.sap_id, req.body.total_after, req.body.package_warranty, req.body.pu_status,
+    req.body.package_details, req.body.maintain_exist]).then((result) => {
       let sales_id = result.rows[0]['sales_id']
 
       pool.query(`UPDATE nano_sales SET sub_total = $1 WHERE id = $2`,
@@ -5705,13 +7606,12 @@ app.post('/addNewSalesPackagev3', (req, res) => {
   req.body.task = JSON.stringify([])
   req.body.sub_completed = JSON.stringify([])
   pool.query(`INSERT INTO nano_sales_package (sales_id, width, height, pack_image, pack_video, remark,
-     package_id, area, task, sub_total, total, discount, services, sqft, size, rate, other_area, sub_completed, discount_roundoff, addon_id, package_warranty, pu_status)
-   VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
-    [req.body.sales_id, req.body.width, req.body.height, req.body.image,
-    req.body.video, req.body.remark, req.body.package_id, req.body.area
-      , req.body.task, req.body.sub_total, req.body.total,
-      null, req.body.service, req.body.sqft, req.body.size,
-    req.body.rate, req.body.other_area, req.body.sub_completed, null, req.body.addon_id, req.body.package_warranty, req.body.pu_status
+     package_id, area, task, sub_total, total, discount, services, sqft, size, rate, other_area, sub_completed, discount_roundoff, addon_id, package_warranty, pu_status, package_details, maintain_exist)
+   VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`,
+    [req.body.sales_id, req.body.width, req.body.height, req.body.image, req.body.video, req.body.remark, req.body.package_id, req.body.area
+      , req.body.task, req.body.sub_total, req.body.total, null, req.body.service, req.body.sqft, req.body.size,
+    req.body.rate, req.body.other_area, req.body.sub_completed, null, req.body.addon_id, req.body.package_warranty, req.body.pu_status,
+    req.body.package_details, req.body.maintain_exist
     ]).then((result) => {
 
       pool.query(`UPDATE nano_sales SET sub_total = $1 WHERE id = $2`,
@@ -5751,6 +7651,77 @@ app.post('/addNewSalesPackagev3', (req, res) => {
     })
 
 })
+
+app.post('/addNewSalesPackageBulk', async (req, res) => {
+  try {
+    console.log('addNewSalesPackageBulk');
+    let type = req.body.servicetype;
+    let quantity = Number(req.body.quantity) || 1;
+    let now = new Date().getTime();
+
+    // Prepare shared fields
+    req.body.from_date = now;
+    req.body.task = JSON.stringify([]);
+    req.body.sub_completed = JSON.stringify([]);
+    let insertedIds = [];
+
+    for (let i = 0; i < quantity; i++) {
+      let result = await pool.query(`
+        INSERT INTO nano_sales_package (
+          sales_id, width, height, pack_image, pack_video, remark, package_id, area, task, sub_total, total, discount,
+          services, sqft, size, rate, other_area, sub_completed, discount_roundoff, addon_id, package_warranty, pu_status,
+          package_details, maintain_exist
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+        ) RETURNING sap_id
+      `, [
+        req.body.sales_id, req.body.width, req.body.height, req.body.image, req.body.video, req.body.remark,
+        req.body.package_id, req.body.area, req.body.task, req.body.sub_total, req.body.total, null,
+        req.body.service, req.body.sqft, req.body.size, req.body.rate, req.body.other_area, req.body.sub_completed,
+        null, req.body.addon_id, req.body.package_warranty, req.body.pu_status, req.body.package_details,
+        req.body.maintain_exist
+      ]);
+      insertedIds.push(result.rows[0].sap_id);
+    }
+
+    // Update total just ONCE after all inserts
+    await pool.query(`UPDATE nano_sales SET sub_total = $1 WHERE id = $2`, [
+      req.body.total_total, req.body.sales_id
+    ]);
+
+    // Log activity just ONCE
+    let userRes = await pool.query(`SELECT user_name FROM nano_user WHERE uid = $1`, [req.body.uid]);
+    let by = userRes.rows[0].user_name;
+    const isBulk = quantity > 1;
+    const actionRemark =
+      isBulk
+        ? (
+            type === 'addon'
+              ? `Bulk Add on Service (${quantity}) added by ${by}`
+              : `Bulk Service (${quantity}) added by ${by}`
+          )
+        : (
+            type === 'addon'
+              ? `New Add on Service added by ${by}`
+              : `New Service added by ${by}`
+          );
+    
+    await pool.query(`
+      INSERT INTO nano_activity_log (lead_id, appointment_id, activity_time, activity_by, remark, activity_type) 
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [
+      req.body.leadid, req.body.aid, now, req.body.uid,
+      actionRemark,
+      'Service'
+    ]);
+
+    return res.status(200).send({ success: true, inserted: insertedIds.length, ids: insertedIds });
+
+  } catch (error) {
+    console.log(error);
+    return res.status(800).send({ success: false, error });
+  }
+});
 
 
 app.post('/addNewSalesPackage2', (req, res) => {
@@ -6214,8 +8185,58 @@ app.post('/getAllQuotationForSE', (req, res) => {
 app.post('/getReceiptInApp', (req, res) => {
   console.log('getReceiptInApp');
 
-  pool.query(`SELECT * FROM nano_payment_log WHERE sales_id = $1`,
+  pool.query(`SELECT * FROM nano_payment_log WHERE sales_id = $1 ORDER BY id DESC`,
     [req.body.sales_id]).then((result) => {
+
+      return res.status(200).send({ data: result.rows, success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ error: error.message, success: false })
+    })
+
+})
+
+app.get('/getSPleader', (req, res) => {
+  console.log('getSPleader');
+
+  pool.query(`SELECT nl.*, ns.*, npl.*,
+  (SELECT JSON_AGG(JSON_BUILD_OBJECT('sales_order_form', orderform, 'sof_breakdown', orderform_breakdown, 'created_date' , created_date, 'isvoid', isvoid) ORDER BY created_date DESC) FROM nano_sales_order WHERE sales_id = ns.id) as salesorderform_list,
+  ( SELECT JSON_AGG(user_name) FROM nano_user WHERE uid IN ( SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(nat.assigned_to4::JSONB))) AS user_name
+  FROM nano_payment_log npl
+  JOIN nano_sales ns ON ns.id = npl.sales_id 
+  JOIN nano_leads nl ON nl.id = ns.lead_id
+  JOIN nano_appointment nat ON nl.id = nat.lead_id
+  WHERE sp_approval_status = true ORDER BY npl.id DESC`).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ error: error.message, success: false })
+  })
+
+})
+
+app.get('/getSPleaderCount', (req, res) => {
+  console.log('getSPleaderCount');
+
+  pool.query(`SELECT * FROM nano_payment_log WHERE (sp_approval_status = true AND sp_leader_approve = 'Pending') ORDER BY id DESC`).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ error: error.message, success: false })
+  })
+
+})
+
+app.post('/removeReceiptInApp', (req, res) => {
+  console.log('removeReceiptInApp');
+
+  pool.query(`DELETE FROM nano_payment_log WHERE id = $1`,
+    [req.body.id]).then((result) => {
 
       return res.status(200).send({ data: result.rows, success: true })
 
@@ -6274,10 +8295,61 @@ app.post('/updateSalesRemark2', (req, res) => {
     [req.body.sales_status, req.body.payment_date, req.body.sales_id, req.body.payment_left]).then((result) => {
       req.body.receipt = JSON.stringify([])
       pool.query(`INSERT INTO nano_payment_log(type, payment_image, total, sales_id
-        ,payment_date, created_by, gateway,remark, receipt, cust_sign, receipt_img, receipt_pdf) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        ,payment_date, created_by, gateway,remark, receipt, cust_sign, receipt_img, receipt_pdf,
+        ac_approval, sc_approval) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
         [req.body.type, req.body.payment_image, req.body.total, req.body.sales_id,
         req.body.payment_date, req.body.created_by, req.body.gateway, req.body.remark, req.body.receipt, req.body.cust_sign,
-        req.body.receipt_img, req.body.receipt_pdf]).then((result) => {
+        req.body.receipt_img, req.body.receipt_pdf, req.body.ac_approval, req.body.sc_approval]).then((result) => {
+
+          req.body.created_date = new Date().getTime()
+          pool.query(`
+          SELECT user_name FROM nano_user WHERE uid = $1
+        `, [req.body.created_by]).then((result) => {
+            let by = result.rows[0]['user_name']
+            pool.query(`
+          INSERT INTO nano_activity_log (lead_id, appointment_id, sales_id, activity_time, activity_by, remark, activity_type) 
+          VALUES($1, $2, $3, $4, $5, $6, $7)
+        `,
+              [req.body.leadid, req.body.aid, req.body.sales_id, req.body.created_date, req.body.created_by, 'Payment RM ' + req.body.total + ' has been pay by customer, updated by ' + by, 'Payment'])
+              .then((result) => {
+                return res.status(200).send({ success: true })
+
+              }).catch((error) => {
+                console.log(error)
+                return res.status(800).send({ success: false })
+              })
+
+          }).catch((error) => {
+            console.log(error)
+            return res.status(800).send({ success: false })
+          })
+
+        }).catch((error) => {
+          console.log(error)
+          return res.status(800).send({ error: error.message, success: false })
+        })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ error: error.message, success: false })
+    })
+})
+
+
+app.post('/updateSalesRemark3', (req, res) => {
+  console.log('updateSalesRemark3');
+
+  pool.query(`UPDATE nano_sales SET (sales_status, payment_date, total) = ($1,$2, $4) WHERE id = $3`,
+    [req.body.sales_status, req.body.payment_date, req.body.sales_id, req.body.payment_left]).then((result) => {
+      req.body.receipt = JSON.stringify([])
+      pool.query(`INSERT INTO nano_payment_log(type, payment_image, total, sales_id
+        ,payment_date, created_by, gateway,remark, receipt, cust_sign, receipt_img, receipt_pdf,
+        ac_approval, sc_approval, sp_approval_status, sp_approval_log, sp_leader_approve, sp_paul_approve) 
+        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
+        [req.body.type, req.body.payment_image, req.body.total, req.body.sales_id,
+        req.body.payment_date, req.body.created_by, req.body.gateway, req.body.remark, req.body.receipt, req.body.cust_sign,
+        req.body.receipt_img, req.body.receipt_pdf, req.body.ac_approval, req.body.sc_approval,
+        req.body.sp_approval_status, req.body.sp_approval_log, req.body.sp_leader_approve, req.body.sp_paul_approve]).then((result) => {
 
           req.body.created_date = new Date().getTime()
           pool.query(`
@@ -6316,8 +8388,6 @@ app.post('/updateSalesRemark2', (req, res) => {
 
 
 
-
-
 //SUB CON
 
 //Sub admin
@@ -6340,22 +8410,33 @@ app.post('/getSpecificCompanyDetailUid', async (req, res) => {
 
 // AND is_complaint != true
 app.post('/getPendingSalesForSubCon', (req, res) => {
-  console.log('getPendingSalesForSubCon')
+  console.log('getPendingSalesForSubCon');
 
-  pool.query(`SELECT nl.customer_name, nl.address, nl.customer_phone, nl.customer_state, nl.customer_city, ns.subcon_state, ns.id AS sales_id, nl.id AS lead_id,
-  (SELECT COUNT(sap_id) FROM nano_sales_package WHERE sales_id = ns.id) AS task_count
-  FROM nano_sales ns LEFT JOIN nano_leads nl ON ns.lead_id = nl.id
-  WHERE pending_subcon = $1::text AND subcon_state = 'Pending' AND (ns.is_complaint = false OR ns.is_complaint is null)`,
-    [req.body.company]).then((result) => {
-
-      return res.status(200).send({ data: result.rows, success: true })
-
-    }).catch((error) => {
-      console.log(error)
-      return res.status(800).send({ error: error.message, success: false })
+  pool.query(`
+  SELECT nl.customer_name, nl.address, nl.customer_phone, nl.customer_state, nl.customer_city, 
+         ns.subcon_state, ns.id AS sales_id, nl.id AS lead_id,
+         (SELECT COUNT(sap_id) FROM nano_sales_package WHERE sales_id = ns.id) AS task_count,
+         (SELECT array_agg(DISTINCT dates::bigint ORDER BY dates::bigint ASC)
+          FROM (
+            SELECT jsonb_array_elements_text(nsp.from_date2::jsonb) AS dates
+            FROM nano_sales_package nsp
+            WHERE nsp.sales_id = ns.id
+          ) subquery) AS install_date
+  FROM nano_sales ns 
+  LEFT JOIN nano_leads nl ON ns.lead_id = nl.id
+  WHERE pending_subcon = $1::text 
+    AND subcon_state = 'Pending' 
+    AND (ns.is_complaint = false OR ns.is_complaint is null)
+`, [req.body.company])
+    .then((result) => {
+      return res.status(200).send({ data: result.rows, success: true });
     })
+    .catch((error) => {
+      console.log(error);
+      return res.status(500).send({ error: error.message, success: false });
+    });
+});
 
-})
 
 app.post('/getPendingSalesForSubCon2', (req, res) => {
   console.log('getPendingSalesForSubCon2');
@@ -6436,6 +8517,48 @@ app.post('/getAllSalesForSubCon', (req, res) => {
 
 })
 
+app.post('/getComplaintAllBySales', async (req, res) => {
+  console.log('getComplaintAllBySales');
+
+  pool.query(`SELECT * FROM nano_sub_complaint WHERE sales_id = $1 ORDER BY id ASC`, [req.body.sales_id]).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ message: error, success: false })
+  })
+})
+
+app.post('/updateSalesStatus', (req, res) => {
+  console.log('updateSalesStatus')
+
+  pool.query(`UPDATE nano_sales SET is_complaint = $1 WHERE id = $2`,
+    [req.body.is_complaint, req.body.sales_id]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ error: error.message, success: false })
+    })
+
+})
+
+app.post('/updateSalesBreakdown', (req, res) => {
+  console.log('updateSalesBreakdown')
+
+  pool.query(`UPDATE nano_sales SET price_breakdown = $1 WHERE id = $2`,
+    [req.body.price_breakdown, req.body.sales_id]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ error: error.message, success: false })
+    })
+
+})
 // this.storeTeamMember = this.storeTeamMember.map((a) => {uid: a['uid'], role: 'member'})
 // [{uid: 'asdasd', role: 'member'}, {uid: 'asdasd', role: 'member'}]// this is how it looks like after map
 // let leader = [{uid: this.storeTeamLeader, role: 'leader'}]
@@ -6493,6 +8616,39 @@ SELECT user_name FROM sub_user WHERE uid = $1
     console.log(error)
     return res.status(800).send({ error: error.message, success: false })
   })
+
+})
+
+
+app.post('/updateSubSalesStatus3', (req, res) => {
+  console.log('updateSubSalesStatus3')
+
+  pool.query(`UPDATE nano_sales SET (subcon_state, accepted_subcon, assigned_worker, sub_team, pm_remark, task_status, assigned_worker_log) = ($1,$2,$3::json, $5::json, $6, true, $7::json) 
+  WHERE id = $4`,
+    [req.body.subcon_state, req.body.accepted_subcon, req.body.assigned_worker, req.body.sales_id, req.body.sub_team, req.body.pm_remark, req.body.assigned_worker_log]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ error: error.message, success: false })
+    })
+
+})
+
+app.post('/updateSubMaintenanceStatus', (req, res) => {
+  console.log('updateSubMaintenanceStatus')
+
+  pool.query(`UPDATE nano_sales SET (m_state, m_accepted_subcon, assigned_worker, sub_team, pm_remark, task_status, assigned_worker_log) = ($1,$2,$3::json, $5::json, $6, true, $7::json) 
+  WHERE id = $4`,
+    [req.body.m_state, req.body.m_accepted_subcon, req.body.assigned_worker, req.body.sales_id, req.body.sub_team, req.body.pm_remark, req.body.assigned_worker_log]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ error: error.message, success: false })
+    })
 
 })
 
@@ -6668,11 +8824,24 @@ app.post('/removeUserFromTeam', (req, res) => {
 
 })
 
+app.post('/getSpecificSubUserPanel', (req, res) => {
+  console.log('getSpecificSubUserPanel')
+
+  pool.query(`SELECT * FROM sub_user WHERE uid = $1`, [req.body.id]).then((result) => {
+
+    return res.status(200).send({ data: result.rows[0], success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ error: error.message, success: false })
+  })
+
+})
 
 app.post('/getSpecificSubUser', (req, res) => {
   console.log('getSpecificSubUser')
 
-  pool.query(`SELECT * FROM sub_user WHERE uid = $1`, [req.body.id]).then((result) => {
+  pool.query(`SELECT * FROM sub_user WHERE uid = $1 AND status IS TRUE`, [req.body.id]).then((result) => {
 
     return res.status(200).send({ data: result.rows[0], success: true })
 
@@ -6771,7 +8940,38 @@ app.post('/checkInSubCon2', async (req, res) => {
     VALUES($8,  $1, $9, $10, $11, $12))
     SELECT * FROM checkinsubcon `,
       [req.body.sales_id, req.body.checkin_time, req.body.checkin_image, req.body.checkin_lat,
-      req.body.checkin_long, req.body.checkin_sub, req.body.checkin_address, req.body.lead_id, now, req.body.uid, 'Check in Installation Task By' + by, 'Subcon/Installation']).then((result) => {
+      req.body.checkin_long, req.body.checkin_sub, req.body.checkin_address, req.body.lead_id, now, req.body.uid, 'Checked In By ' + by, 'Subcon/Installation']).then((result) => {
+
+        return res.status(200).send({ success: true })
+
+      }).catch((error) => {
+        console.log(error)
+        return res.status(800).send({ message: error.message, success: false })
+      })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ message: error.message, success: false })
+  })
+})
+
+app.post('/checkInSubCon3', async (req, res) => {
+  console.log('checkInSubCon3');
+
+  let now = new Date().getTime()
+  pool.query(`
+  SELECT user_name FROM sub_user WHERE uid = $1
+`, [req.body.uid]).then((result) => {
+    let by = result.rows[0]['user_name']
+
+    pool.query(
+      `WITH checkinsubcon as (INSERT INTO sub_check_in ( sales_id, checkin_time, checkin_img, checkin_lat, checkin_long, checkin_sub, checkin_address, check_useruid) VALUES 
+    ($1, $2, $3, $4, $5, $6, $7, $10) RETURNING *),
+    insertactivitylog as (INSERT INTO nano_activity_log (lead_id, sales_id, activity_time, activity_by, remark, activity_type) 
+    VALUES($8,  $1, $9, $10, $11, $12))
+    SELECT * FROM checkinsubcon `,
+      [req.body.sales_id, req.body.checkin_time, req.body.checkin_image, req.body.checkin_lat,
+      req.body.checkin_long, req.body.checkin_sub, req.body.checkin_address, req.body.lead_id, now, req.body.uid, 'Check-in Installation By ' + by, 'Subcon/Installation']).then((result) => {
 
         return res.status(200).send({ success: true })
 
@@ -6830,8 +9030,8 @@ app.post('/checkOutSubCon2', async (req, res) => {
         insertactivitylog as (INSERT INTO nano_activity_log (lead_id, sales_id, activity_time, activity_by, remark, activity_type) 
         VALUES($4, $5, $6, $7, $8, $9))
         SELECT * FROM updatecheckout`,
-        [req.body.check_id, req.body.check_out, 'This time slot has been check out by ' + name,
-        req.body.lead_id, req.body.sales_id, now, req.body.check_out_by, 'Check Out Installation Task By' + name, 'Subcon/Installation']).then((result) => {
+        [req.body.check_id, req.body.check_out, 'Checked Out by ' + name,
+        req.body.lead_id, req.body.sales_id, now, req.body.check_out_by, 'Check Out Installation Task By ' + name, 'Subcon/Installation']).then((result) => {
 
           return res.status(200).send({ success: true })
 
@@ -6847,6 +9047,150 @@ app.post('/checkOutSubCon2', async (req, res) => {
 
 
 })
+
+app.post('/checkOutSubCon3', async (req, res) => {
+  console.log('checkOutSubCon3');
+  let now = new Date().getTime();
+
+  try {
+    // 1. Get user name
+    const userResult = await pool.query(
+      `SELECT user_name FROM sub_user WHERE uid = $1`,
+      [req.body.check_out_by]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(400).send({ message: 'User not found', success: false });
+    }
+
+    const name = userResult.rows[0]['user_name'];
+
+    // 2. Verify the check-in belongs to the user trying to check out
+    const checkInResult = await pool.query(
+      `SELECT check_useruid FROM sub_check_in WHERE id = $1`,
+      [req.body.check_id]
+    );
+
+    if (checkInResult.rows.length === 0) {
+      return res.status(400).send({ message: 'Check-in record not found', success: false });
+    }
+
+    if (checkInResult.rows[0].check_useruid !== req.body.check_out_by) {
+      return res.status(403).send({ message: 'You can only check out your own check-ins', success: false });
+    }
+
+    // 3. Update check-out
+    const updateResult = await pool.query(
+      `WITH updatecheckout as (
+        UPDATE sub_check_in 
+        SET (check_out, check_out_by) = ($2, $3) 
+        WHERE id = $1 AND check_useruid = $7
+        RETURNING *
+       ),
+       insertactivitylog as (
+        INSERT INTO nano_activity_log 
+        (lead_id, sales_id, activity_time, activity_by, remark, activity_type) 
+        VALUES($4, $5, $6, $7, $8, $9)
+       )
+       SELECT * FROM updatecheckout`,
+      [
+        req.body.check_id,
+        req.body.check_out,
+        'Check-out Installation By ' + name,
+        req.body.lead_id,
+        req.body.sales_id,
+        now,
+        req.body.check_out_by,
+        'Check-out Installation By ' + name,
+        'Subcon/Installation'
+      ]
+    );
+
+    if (updateResult.rows.length === 0) {
+      return res.status(400).send({ message: 'Check-out failed - record not updated', success: false });
+    }
+
+    return res.status(200).send({ success: true });
+
+  } catch (error) {
+    console.log(error);
+    return res.status(500).send({ message: error.message, success: false });
+  }
+});
+
+app.post('/checkOutSubCon4', async (req, res) => {
+  console.log('checkOutSubCon4');
+  let now = new Date().getTime();
+
+  try {
+    // 1. Get user name
+    const userResult = await pool.query(
+      `SELECT user_name FROM sub_user WHERE uid = $1`,
+      [req.body.check_out_by]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(400).send({ message: 'User not found', success: false });
+    }
+
+    const name = userResult.rows[0]['user_name'];
+
+    // 2. Verify the check-in belongs to the user trying to check out
+    const checkInResult = await pool.query(
+      `SELECT check_useruid FROM sub_check_in WHERE id = $1`,
+      [req.body.check_id]
+    );
+
+    if (checkInResult.rows.length === 0) {
+      return res.status(400).send({ message: 'Check-in record not found', success: false });
+    }
+
+    if (checkInResult.rows[0].check_useruid !== req.body.check_out_by) {
+      return res.status(403).send({ message: 'You can only check out your own check-ins', success: false });
+    }
+
+    // 3. Update check-out
+    const updateResult = await pool.query(
+      `WITH updatecheckout as (
+        UPDATE sub_check_in 
+        SET (check_out, check_out_by, check_out_img, check_out_lat, check_out_long, check_out_address) = ($2, $3, $10, $11, $12, $13) 
+        WHERE id = $1 AND check_useruid = $7
+        RETURNING *
+       ),
+       insertactivitylog as (
+        INSERT INTO nano_activity_log 
+        (lead_id, sales_id, activity_time, activity_by, remark, activity_type) 
+        VALUES($4, $5, $6, $7, $8, $9)
+       )
+       SELECT * FROM updatecheckout`,
+      [
+        req.body.check_id,
+        req.body.check_out,
+        'Check-out Installation By ' + name,
+        req.body.lead_id,
+        req.body.sales_id,
+        now,
+        req.body.check_out_by,
+        'Check-out Installation By ' + name,
+        'Subcon/Installation',
+        req.body.check_out_img,
+        req.body.check_out_lat,
+        req.body.check_out_long,
+        req.body.check_out_address,
+      ]
+    );
+
+    if (updateResult.rows.length === 0) {
+      return res.status(400).send({ message: 'Check-out failed - record not updated', success: false });
+    }
+
+    return res.status(200).send({ success: true });
+
+  } catch (error) {
+    console.log(error);
+    return res.status(500).send({ message: error.message, success: false });
+  }
+});
 
 app.post('/getCheckinForSub', async (req, res) => {
   console.log('getCheckinForSub');
@@ -6924,7 +9268,7 @@ app.post('/getMonthTaskForUpcoming', async (req, res) => {
       FROM nano_sales ns LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
       WHERE $1::text IN 
       (SELECT REPLACE(bj.value ->> 'uid'::varchar(100), '"', '') FROM JSON_ARRAY_ELEMENTS(ns.assigned_worker) bj) 
-      AND ns.subcon_state::text = 'Accepted' AND (ns.status = false OR ns.status is null))
+      AND ns.subcon_state::text = 'Accepted' AND (ns.status = false OR ns.status is null) OR ns.is_postpone = true) 
       SELECT * FROM selectdata WHERE from_date2::BIGINT >= $2 and from_date2::BIGINT <= $3`, [req.body.uid, req.body.startdate, req.body.enddate]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
@@ -6937,32 +9281,161 @@ app.post('/getMonthTaskForUpcoming', async (req, res) => {
 
 app.post('/getTaskListForUpcoming', async (req, res) => {
   console.log('getTaskListForUpcoming');
-  // LbdDaz3w3yPFVjTEQVr6PbGP3PC3
 
-  pool.query(`WITH selectdata AS (SELECT nl.customer_name, nl.customer_phone, nl.address, ns.id AS sales_id, ns.assigned_worker AS worker, ns.status,
-  (SELECT JSON_AGG(JSON_BUILD_OBJECT('sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark,
-  'task', nsp.task, 'from_date', nsp.from_date,  'from_date2', nsp.from_date2, 'sub_completed', nsp.sub_completed, 'sub_total', nsp.sub_total, 'total', nsp.total, 'discount', nsp.discount,
-  'services', nsp.services, 'sqft', nsp.sqft, 'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area ))
-   FROM nano_sales_package nsp LEFT JOIN nano_packages np ON nsp.package_id = np.id  WHERE sales_id = ns.id ) AS sap,
-
-   JSON_ARRAY_ELEMENTS_TEXT(nsp.from_date2) AS schedule_date,
-
-  (SELECT j.value ->> 'role' FROM nano_sales s, JSON_ARRAY_ELEMENTS(assigned_worker) j 
-  WHERE j.value ->> 'uid' = $1  AND s.id = ns.id) AS role
-
-  FROM nano_sales ns LEFT JOIN nano_leads nl ON ns.lead_id = nl.id LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id WHERE $1::text IN 
-  (SELECT REPLACE(bj.value ->> 'uid'::varchar(100), '"', '') FROM JSON_ARRAY_ELEMENTS(ns.assigned_worker) bj)
-  AND ns.subcon_state = 'Accepted' AND (ns.status = false OR ns.status is null))
-  SELECT * FROM selectdata WHERE schedule_date::BIGINT >= $2 AND schedule_date::BIGINT <= $3 ORDER BY schedule_date::bigint ASC`
-    , [req.body.uid, req.body.from_date, req.body.to_date]).then((result) => {
-
-      return res.status(200).send({ data: result.rows, success: true })
-
-    }).catch((error) => {
-      console.log(error)
-      return res.status(800).send({ message: error, success: false })
+  pool.query(`
+    WITH selectdata AS (
+      SELECT 
+        nl.customer_name, nl.customer_phone, nl.address, 
+        ns.id AS sales_id, ns.assigned_worker AS worker, 
+        ns.status, ns.scaff_fee, ns.skylift_fee,
+        (
+          SELECT JSON_AGG(JSON_BUILD_OBJECT(
+            'sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark,
+            'task', nsp.task, 'from_date', nsp.from_date, 'from_date2', nsp.from_date2, 'from_date3', nsp.from_date3,
+            'sub_completed', nsp.sub_completed, 'sub_total', nsp.sub_total, 'total', nsp.total, 'discount', nsp.discount,
+            'services', nsp.services, 'sqft', nsp.sqft, 'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area
+          )) FROM nano_sales_package nsp LEFT JOIN nano_packages np ON nsp.package_id = np.id WHERE nsp.sales_id = ns.id
+        ) AS sap,
+        JSON_ARRAY_ELEMENTS_TEXT(nsp.from_date2) AS schedule_date,
+        (
+          SELECT STRING_AGG(j.value ->> 'role', ',') 
+          FROM nano_sales s, JSON_ARRAY_ELEMENTS(assigned_worker) j 
+          WHERE j.value ->> 'uid' = $1 AND s.id = ns.id
+        ) AS role,
+        (
+          SELECT COALESCE(JSON_AGG(schedule.*), '[]'::json)
+          FROM nano_schedule AS schedule
+          WHERE schedule.sales_id = ns.id AND schedule.status = true
+        ) AS work_schedule
+      FROM nano_sales ns
+      LEFT JOIN nano_leads nl ON ns.lead_id = nl.id
+      LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+      WHERE $1::text IN (
+        SELECT REPLACE(bj.value ->> 'uid'::varchar(100), '"', '') 
+        FROM JSON_ARRAY_ELEMENTS(ns.assigned_worker) bj
+      )
+      AND ns.subcon_state = 'Accepted'
+      AND (ns.status = false OR ns.status IS NULL OR ns.is_postpone = true)
+    )
+    SELECT * FROM selectdata 
+    WHERE schedule_date::BIGINT >= $2 AND schedule_date::BIGINT <= $3 
+    ORDER BY schedule_date::BIGINT ASC
+  `, [req.body.uid, req.body.from_date, req.body.to_date])
+    .then((result) => {
+      return res.status(200).send({ data: result.rows, success: true });
     })
-})
+    .catch((error) => {
+      console.log(error);
+      return res.status(800).send({ message: error, success: false });
+    });
+});
+
+
+app.post('/getMonthTaskForUpcoming2', async (req, res) => {
+  console.log('getMonthTaskForUpcoming2');
+  pool.query(`
+    WITH selectdata AS (
+      SELECT ns.id AS sales_id, ns.assigned_worker AS worker, ns.status, nsp.from_date, 
+        JSON_ARRAY_ELEMENTS_TEXT(nsp.from_date2) AS schedule_date
+      FROM nano_sales ns
+      LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+      WHERE $1::text IN (
+        SELECT REPLACE(bj.value ->> 'uid'::varchar(100), '"', '') FROM JSON_ARRAY_ELEMENTS(ns.assigned_worker) bj
+      )
+      AND ns.subcon_state::text = 'Accepted'
+      AND (ns.status = false OR ns.status IS NULL OR ns.is_postpone = true)
+
+      UNION ALL
+
+      SELECT ns.id AS sales_id, ns.assigned_worker AS worker, ns.status, nsp.from_date, 
+        JSON_ARRAY_ELEMENTS_TEXT(nsp.from_date4) AS schedule_date
+      FROM nano_sales ns
+      LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+      WHERE $1::text IN (
+        SELECT REPLACE(bj.value ->> 'uid'::varchar(100), '"', '') FROM JSON_ARRAY_ELEMENTS(ns.assigned_worker) bj
+      )
+      AND ns.subcon_state::text = 'Accepted'
+      AND (ns.status = false OR ns.status IS NULL OR ns.is_postpone = true)
+    )
+    SELECT * FROM selectdata WHERE schedule_date::BIGINT >= $2 and schedule_date::BIGINT <= $3
+  `, [req.body.uid, req.body.startdate, req.body.enddate]).then((result) => {
+    return res.status(200).send({ data: result.rows, success: true });
+  }).catch((error) => {
+    console.log(error);
+    return res.status(800).send({ message: error, success: false });
+  });
+});
+
+
+app.post('/getTaskListForUpcoming2', async (req, res) => {
+  console.log('getTaskListForUpcoming2');
+
+  pool.query(`
+    WITH selectdata AS (
+      SELECT 
+        nl.customer_name, nl.customer_phone, nl.address, 
+        ns.id AS sales_id, ns.assigned_worker AS worker, 
+        ns.status, ns.scaff_fee, ns.skylift_fee,
+        (
+          SELECT JSON_AGG(JSON_BUILD_OBJECT(
+            'sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark,
+            'task', nsp.task, 'from_date', nsp.from_date, 'from_date2', nsp.from_date2, 'from_date3', nsp.from_date3, 'from_date4', nsp.from_date4,
+            'sub_completed', nsp.sub_completed, 'sub_total', nsp.sub_total, 'total', nsp.total, 'discount', nsp.discount,
+            'services', nsp.services, 'sqft', nsp.sqft, 'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area
+          )) FROM nano_sales_package nsp LEFT JOIN nano_packages np ON nsp.package_id = np.id WHERE nsp.sales_id = ns.id
+        ) AS sap,
+        schedule_date,
+        (
+          SELECT STRING_AGG(j.value ->> 'role', ',') 
+          FROM nano_sales s, JSON_ARRAY_ELEMENTS(assigned_worker) j 
+          WHERE j.value ->> 'uid' = $1 AND s.id = ns.id
+        ) AS role,
+        (
+          SELECT COALESCE(JSON_AGG(schedule.*), '[]'::json)
+          FROM nano_schedule AS schedule
+          WHERE schedule.sales_id = ns.id AND schedule.status = true
+        ) AS work_schedule
+      FROM nano_sales ns
+      LEFT JOIN nano_leads nl ON ns.lead_id = nl.id
+      LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+      CROSS JOIN LATERAL (
+        SELECT schedule_date
+        FROM (
+          SELECT UNNEST(
+            ARRAY[
+              CASE WHEN nsp.from_date2 IS NULL OR nsp.from_date2::text IN ('null', '[]') THEN '[]'::json ELSE nsp.from_date2 END,
+              CASE WHEN nsp.from_date4 IS NULL OR nsp.from_date4::text IN ('null', '[]') THEN '[]'::json ELSE nsp.from_date4 END
+            ]
+          ) AS arr
+        ) AS t1,
+        JSON_ARRAY_ELEMENTS_TEXT(t1.arr) AS schedule_date
+      ) AS all_dates
+      WHERE $1::text IN (
+        SELECT REPLACE(bj.value ->> 'uid'::varchar(100), '"', '') 
+        FROM JSON_ARRAY_ELEMENTS(ns.assigned_worker) bj
+      )
+      AND ns.subcon_state = 'Accepted'
+      AND (ns.status = false OR ns.status IS NULL OR ns.is_postpone = true)
+    )
+    SELECT * FROM selectdata 
+    WHERE schedule_date::BIGINT >= $2 AND schedule_date::BIGINT <= $3 
+    ORDER BY schedule_date::BIGINT ASC
+  `, [req.body.uid, req.body.from_date, req.body.to_date])
+    .then((result) => {
+      return res.status(200).send({ data: result.rows, success: true });
+    })
+    .catch((error) => {
+      console.log(error);
+      return res.status(800).send({ message: error, success: false });
+    });
+});
+
+
+
+
+
+
+
 
 //complete task api
 app.post('/getMonthTaskForCompleted', async (req, res) => {
@@ -6973,7 +9446,7 @@ app.post('/getMonthTaskForCompleted', async (req, res) => {
       FROM nano_sales ns LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
       WHERE $1::text IN 
       (SELECT REPLACE(bj.value ->> 'uid'::varchar(100), '"', '') FROM JSON_ARRAY_ELEMENTS(ns.assigned_worker) bj) 
-      AND ns.subcon_state::text = 'Accepted' AND ns.status = true)
+      AND ns.subcon_state::text = 'Accepted' AND ((ns.final_approval = true) OR (ns.status = true)) )
       SELECT * FROM selectdata WHERE from_date2::BIGINT >= $2 and from_date2::BIGINT <= $3`, [req.body.uid, req.body.startdate, req.body.enddate]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
@@ -7001,7 +9474,7 @@ app.post('/getTaskListForCompleted', async (req, res) => {
 
   FROM nano_sales ns LEFT JOIN nano_leads nl ON ns.lead_id = nl.id LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id WHERE $1::text IN 
   (SELECT REPLACE(bj.value ->> 'uid'::varchar(100), '"', '') FROM JSON_ARRAY_ELEMENTS(ns.assigned_worker) bj)
-  AND ns.subcon_state = 'Accepted' AND ns.status = true )
+  AND ns.subcon_state = 'Accepted' AND ((ns.final_approval = true) OR (ns.status = true)) )
   SELECT * FROM selectdata WHERE schedule_date::BIGINT >= $2 AND schedule_date::BIGINT <= $3 ORDER BY schedule_date::bigint ASC`
     , [req.body.uid, req.body.from_date, req.body.to_date]).then((result) => {
 
@@ -7041,17 +9514,37 @@ app.post('/getCompletedTaskListPM', async (req, res) => {
 app.post('/getCompletedTaskListPM2', async (req, res) => {
   console.log('getCompletedTaskListPM2')
 
-  pool.query(`WITH selectdata AS (SELECT nl.customer_name, nl.customer_phone, nl.address, ns.id AS sales_id, ns.lead_id, ns.assigned_worker AS worker, ns.status, ns.final_approval,
-  (SELECT JSON_AGG(JSON_BUILD_OBJECT('sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark,
-  'task', nsp.task, 'from_date', nsp.from_date,  'from_date2', nsp.from_date2, 'sub_completed', nsp.sub_completed, 'sub_total', nsp.sub_total, 'total', nsp.total, 'discount', nsp.discount,
-  'services', nsp.services, 'sqft', nsp.sqft, 'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area ))
-   FROM nano_sales_package nsp LEFT JOIN nano_packages np ON nsp.package_id = np.id  WHERE sales_id = ns.id ) AS sap,
-
-   JSON_ARRAY_ELEMENTS_TEXT(nsp.from_date2) AS schedule_date
-
-  FROM nano_sales ns LEFT JOIN nano_leads nl ON ns.lead_id = nl.id LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id WHERE
-   ns.subcon_state = 'Accepted' AND ns.status = true AND ns.pending_subcon = $3::text )
-  SELECT * FROM selectdata WHERE schedule_date::BIGINT >= $1 AND schedule_date::BIGINT <= $2`
+  pool.query(`WITH sales_data AS 
+  (SELECT 
+        ns.id AS sales_id, ns.lead_id, ns.assigned_worker AS worker, ns.status, ns.final_approval, ns.is_complaint, ns.task_completed_date AS completed_date, nl.customer_name, 
+        nl.customer_phone, nl.customer_state, nl.customer_city, nl.address, nl.services, nsp.from_date2 AS schedule_dates, nl.id AS lead_id,
+        (
+            SELECT 
+                JSON_AGG(JSON_BUILD_OBJECT(
+                    'sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark, 'task', nsp.task, 'from_date', nsp.from_date,  'from_date2', nsp.from_date2, 
+                    'sub_completed', nsp.sub_completed, 'sub_total', nsp.sub_total, 'total', nsp.total, 'discount', nsp.discount, 'services', nsp.services, 'sqft', nsp.sqft, 
+                    'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area))
+            FROM nano_sales_package nsp
+            LEFT JOIN nano_packages np ON nsp.package_id = np.id
+            WHERE nsp.sales_id = ns.id
+        ) AS sap,
+        (
+            SELECT REGEXP_REPLACE(ssf.serviceform, '.*/(SER-NANO-[^-]+).*', '\\1')
+            FROM (
+                SELECT DISTINCT ON (lead_id) lead_id, serviceform
+                FROM subcon_service_form
+                WHERE lead_id = ns.lead_id
+                ORDER BY lead_id, serviceform DESC
+            ) AS ssf
+        ) AS ser_num
+    FROM nano_sales ns
+    LEFT JOIN nano_leads nl ON ns.lead_id = nl.id
+    LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+    WHERE (ns.subcon_state = 'Accepted' OR ns.subcon_state = 'Rejected') AND ns.status IS NOT NULL AND ns.pending_subcon = $3::text
+  )
+    SELECT * FROM sales_data WHERE EXISTS (SELECT 1 FROM JSON_ARRAY_ELEMENTS_TEXT(schedule_dates) AS schedule_date WHERE schedule_date::BIGINT >= $1 AND schedule_date::BIGINT <= $2)
+    ORDER BY completed_date DESC NULLS LAST;
+`
     , [req.body.from_date, req.body.to_date, req.body.company]).then((result) => {
 
       return res.status(200).send({ data: result.rows, success: true })
@@ -7061,6 +9554,315 @@ app.post('/getCompletedTaskListPM2', async (req, res) => {
       return res.status(800).send({ message: error, success: false })
     })
 })
+
+app.post('/getMaintenanceListAll', async (req, res) => {
+  console.log('getMaintenanceListAll');
+
+  try {
+    const currentUserUid = req.body.uid; // Make sure to pass this from frontend
+
+    // First get all maintenance records for the current user
+    const baseQuery = `SELECT 
+    ns.*, 
+    nl.*, ns.id as sales_id,
+    nu.user_name AS sc_name,
+    (
+      SELECT JSON_AGG(nsp)
+      FROM nano_sales_package nsp
+      WHERE nsp.sales_id = ns.id
+      AND nsp.maintain_exist = true
+    ) AS packages,
+    (
+      SELECT REGEXP_REPLACE(ssf.serviceform, '.*/(SER-NANO-[^-]+).*', '\\1')
+      FROM (
+        SELECT DISTINCT ON (lead_id) lead_id, serviceform
+        FROM subcon_service_form
+        WHERE lead_id = ns.lead_id
+        ORDER BY lead_id, serviceform DESC
+      ) AS ssf
+    ) AS ser_num,
+    (
+      SELECT na.assigned_to4
+      FROM nano_appointment na
+      WHERE na.lead_id = ns.lead_id
+      LIMIT 1
+    ) AS assigned_to4,
+    (
+      SELECT JSON_AGG(json_build_object(
+        'uid', nu.uid,
+        'name', COALESCE(nu.user_name, 'Unknown')
+      ))
+      FROM nano_user nu
+      WHERE nu.uid = ANY(
+        SELECT jsonb_array_elements_text(na.assigned_to4::jsonb)
+        FROM nano_appointment na
+        WHERE na.lead_id = ns.lead_id
+        LIMIT 1
+      )
+    ) AS assigned_users_info,
+    (
+      SELECT id
+      FROM nano_payment_log npl
+      WHERE npl.sales_id = ns.id
+      ORDER BY npl.id DESC
+      LIMIT 1
+    ) AS payid
+  FROM nano_sales ns
+  JOIN nano_leads nl ON nl.id = ns.lead_id
+LEFT JOIN nano_user nu ON nl.sales_coordinator = nu.uid
+  WHERE EXISTS (
+    SELECT 1
+    FROM nano_sales_package nsp
+    WHERE nsp.sales_id = ns.id
+    AND nsp.maintain_exist = true
+  )
+  AND ns.created_date BETWEEN $1 AND $2`;
+
+    const baseResult = await pool.query(baseQuery, [
+      req.body.from_date,
+      req.body.to_date
+    ]);
+
+    // Process and sort the data in Node.js
+    const processedData = baseResult.rows.map(row => {
+      let nextMaintenanceDate = null;
+
+      if (row.packages && row.packages.length > 0) {
+        const allDates = row.packages.flatMap(pkg =>
+          pkg.maintain_date ? pkg.maintain_date.map(d => d.date) : []
+        );
+
+        if (allDates.length > 0) {
+          nextMaintenanceDate = Math.min(...allDates);
+        }
+      }
+
+      return {
+        ...row,
+        next_maintenance_date: nextMaintenanceDate,
+        // Add formatted date for display
+        next_maintenance_date_formatted: nextMaintenanceDate ? new Date(nextMaintenanceDate).toLocaleDateString() : 'Not scheduled'
+      };
+    });
+
+    // Sort by maintenance date
+    processedData.sort((a, b) => {
+      if (a.next_maintenance_date === null) return 1;
+      if (b.next_maintenance_date === null) return -1;
+      return a.next_maintenance_date - b.next_maintenance_date;
+    });
+
+    return res.status(200).send({
+      data: processedData,
+      success: true
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).send({
+      message: 'Error fetching maintenance list',
+      success: false
+    });
+  }
+});
+
+app.post('/getMaintenanceListPM', async (req, res) => {
+  console.log('getMaintenanceListPM');
+
+  try {
+    // First get all maintenance records
+    const baseQuery = `
+      SELECT 
+        ns.*,
+        nl.*,
+        (
+          SELECT JSON_AGG(nsp)
+          FROM nano_sales_package nsp
+          WHERE nsp.sales_id = ns.id
+          AND nsp.maintain_exist = true
+        ) AS packages,
+        (
+          SELECT REGEXP_REPLACE(ssf.serviceform, '.*/(SER-NANO-[^-]+).*', '\\1')
+          FROM (
+              SELECT DISTINCT ON (lead_id) lead_id, serviceform
+              FROM subcon_service_form
+              WHERE lead_id = ns.lead_id
+              ORDER BY lead_id, serviceform DESC
+          ) AS ssf
+      ) AS ser_num
+      FROM nano_sales ns
+      JOIN nano_leads nl ON nl.id = ns.lead_id
+      WHERE EXISTS (
+        SELECT 1
+        FROM nano_sales_package nsp
+        WHERE nsp.sales_id = ns.id
+        AND nsp.maintain_exist = true
+      )
+      AND ns.created_date BETWEEN $1 AND $2
+      AND ns.pending_subcon = $3::text
+    `;
+
+    const baseResult = await pool.query(baseQuery, [
+      req.body.from_date,
+      req.body.to_date,
+      req.body.company
+    ]);
+
+    // Process and sort the data in Node.js
+    const processedData = baseResult.rows.map(row => {
+      let nextMaintenanceDate = null;
+
+      if (row.packages && row.packages.length > 0) {
+        const allDates = row.packages.flatMap(pkg =>
+          pkg.maintain_date ? pkg.maintain_date.map(d => d.date) : []
+        );
+
+        if (allDates.length > 0) {
+          nextMaintenanceDate = Math.min(...allDates);
+        }
+      }
+
+      return {
+        ...row,
+        next_maintenance_date: nextMaintenanceDate
+      };
+    });
+
+    // Sort by maintenance date
+    processedData.sort((a, b) => {
+      if (a.next_maintenance_date === null) return 1;
+      if (b.next_maintenance_date === null) return -1;
+      return a.next_maintenance_date - b.next_maintenance_date;
+    });
+
+    return res.status(200).send({
+      data: processedData,
+      success: true
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).send({
+      message: 'Error fetching maintenance list',
+      success: false
+    });
+  }
+});
+
+app.post('/getMaintenanceListSE', async (req, res) => {
+  console.log('getMaintenanceListSE');
+
+  try {
+    const currentUserUid = req.body.uid; // Make sure to pass this from frontend
+
+    // First get all maintenance records for the current user
+    const baseQuery = `SELECT 
+    ns.*, 
+    nl.*, ns.id as sales_id,
+    nu.user_name AS sc_name,
+    (
+      SELECT JSON_AGG(nsp)
+      FROM nano_sales_package nsp
+      WHERE nsp.sales_id = ns.id
+      AND nsp.maintain_exist = true
+    ) AS packages,
+    (
+      SELECT REGEXP_REPLACE(ssf.serviceform, '.*/(SER-NANO-[^-]+).*', '\\1')
+      FROM (
+        SELECT DISTINCT ON (lead_id) lead_id, serviceform
+        FROM subcon_service_form
+        WHERE lead_id = ns.lead_id
+        ORDER BY lead_id, serviceform DESC
+      ) AS ssf
+    ) AS ser_num,
+    (
+      SELECT na.assigned_to4
+      FROM nano_appointment na
+      WHERE na.lead_id = ns.lead_id
+      LIMIT 1
+    ) AS assigned_to4,
+    (
+      SELECT JSON_AGG(json_build_object(
+        'uid', nu.uid,
+        'name', COALESCE(nu.user_name, 'Unknown')
+      ))
+      FROM nano_user nu
+      WHERE nu.uid = ANY(
+        SELECT jsonb_array_elements_text(na.assigned_to4::jsonb)
+        FROM nano_appointment na
+        WHERE na.lead_id = ns.lead_id
+        LIMIT 1
+      )
+    ) AS assigned_users_info,
+    (
+      SELECT id
+      FROM nano_payment_log npl
+      WHERE npl.sales_id = ns.id
+      ORDER BY npl.id DESC
+      LIMIT 1
+    ) AS payid
+  FROM nano_sales ns
+  JOIN nano_leads nl ON nl.id = ns.lead_id
+  LEFT JOIN nano_user nu ON nl.sales_coordinator = nu.uid
+  WHERE EXISTS (
+    SELECT 1
+    FROM nano_sales_package nsp
+    WHERE nsp.sales_id = ns.id
+    AND nsp.maintain_exist = true
+  )
+  AND ns.created_date BETWEEN $1 AND $2
+  AND EXISTS (
+    SELECT 1
+    FROM nano_appointment na
+    WHERE na.lead_id = ns.lead_id
+    AND na.assigned_to4::jsonb ? $3
+  )`;
+
+    const baseResult = await pool.query(baseQuery, [
+      req.body.from_date,
+      req.body.to_date,
+      currentUserUid
+    ]);
+
+    // Process and sort the data in Node.js
+    const processedData = baseResult.rows.map(row => {
+      let nextMaintenanceDate = null;
+
+      if (row.packages && row.packages.length > 0) {
+        const allDates = row.packages.flatMap(pkg =>
+          pkg.maintain_date ? pkg.maintain_date.map(d => d.date) : []
+        );
+
+        if (allDates.length > 0) {
+          nextMaintenanceDate = Math.min(...allDates);
+        }
+      }
+
+      return {
+        ...row,
+        next_maintenance_date: nextMaintenanceDate,
+        // Add formatted date for display
+        next_maintenance_date_formatted: nextMaintenanceDate ? new Date(nextMaintenanceDate).toLocaleDateString() : 'Not scheduled'
+      };
+    });
+
+    // Sort by maintenance date
+    processedData.sort((a, b) => {
+      if (a.next_maintenance_date === null) return 1;
+      if (b.next_maintenance_date === null) return -1;
+      return a.next_maintenance_date - b.next_maintenance_date;
+    });
+
+    return res.status(200).send({
+      data: processedData,
+      success: true
+    });
+  } catch (error) {
+    console.log(error);
+    return res.status(500).send({
+      message: 'Error fetching maintenance list',
+      success: false
+    });
+  }
+});
 
 app.post('/getCompletedTaskListPM3', async (req, res) => {
   console.log('getCompletedTaskListPM3')
@@ -7072,11 +9874,54 @@ app.post('/getCompletedTaskListPM3', async (req, res) => {
    JSON_ARRAY_ELEMENTS_TEXT(nsp.from_date2) AS schedule_date
 
   FROM nano_sales ns LEFT JOIN nano_leads nl ON ns.lead_id = nl.id LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id WHERE
-   ns.subcon_state = 'Accepted' AND ns.status = true AND ns.pending_subcon = $3::text )
+   ns.subcon_state = 'Accepted' AND (ns.status = true OR (ns.status = false AND ns.is_complaint = true)) AND ns.pending_subcon = $3::text )
   SELECT * FROM selectdata WHERE schedule_date::BIGINT >= $1 AND schedule_date::BIGINT <= $2`
     , [req.body.from_date, req.body.to_date, req.body.company]).then((result) => {
 
       return res.status(200).send({ data: result.rows, success: true });
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ message: error, success: false })
+    })
+})
+
+app.post('/getTaskListPA', async (req, res) => {
+  console.log('getTaskListPA')
+
+  pool.query(`WITH sales_data AS (
+    SELECT 
+        ns.id AS sales_id, ns.lead_id, ns.assigned_worker AS worker, ns.status, ns.final_approval, ns.is_complaint, ns.task_completed_date AS completed_date, nl.customer_name, 
+        nl.customer_phone, nl.customer_state, nl.customer_city, nl.address, nl.services, nsp.from_date2 AS schedule_dates, nl.id AS lead_id,
+        ( SELECT JSON_AGG(JSON_BUILD_OBJECT(
+                    'sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark, 'task', nsp.task, 'from_date', nsp.from_date, 
+                    'from_date2', nsp.from_date2, 'sub_completed', nsp.sub_completed, 'sub_total', nsp.sub_total, 'total', nsp.total, 
+                    'discount', nsp.discount, 'services', nsp.services, 'sqft', nsp.sqft, 'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area
+                ))
+            FROM nano_sales_package nsp LEFT JOIN nano_packages np ON nsp.package_id = np.id WHERE nsp.sales_id = ns.id
+        ) AS sap, 
+        ssf_data.ser_num AS ser_num, ssf_data.form_approval AS form_approval, ssf_data.form_status AS form_status, ssf_data.created_date AS form_date,
+        COALESCE((SELECT JSON_AGG(nsc.created_date) FROM nano_sub_complaint nsc WHERE nsc.lead_id = nl.id), '[]') AS complaint_date
+    FROM nano_sales ns
+    LEFT JOIN nano_leads nl ON ns.lead_id = nl.id
+    LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+    LEFT JOIN LATERAL (
+        SELECT REGEXP_REPLACE(ssf.serviceform, '.*/(SER-NANO-[^-]+).*', '\\1') AS ser_num, ssf.form_approval, ssf.form_status, ssf.created_date
+        FROM subcon_service_form ssf
+        WHERE ssf.lead_id = ns.lead_id
+        ORDER BY ssf.lead_id, ssf.serviceform DESC
+        LIMIT 1
+    ) ssf_data ON true WHERE ns.subcon_state = 'Accepted' AND ns.status IS NOT NULL
+)
+SELECT * FROM sales_data WHERE ser_num IS NOT NULL AND final_approval IS TRUE AND EXISTS (
+        SELECT 1 FROM JSON_ARRAY_ELEMENTS_TEXT(schedule_dates) AS schedule_date WHERE schedule_date::BIGINT >= $1 AND schedule_date::BIGINT <= $2
+    )
+ORDER BY completed_date DESC NULLS LAST;
+
+`
+    , [req.body.from_date, req.body.to_date]).then((result) => {
+
+      return res.status(200).send({ data: result.rows, success: true })
 
     }).catch((error) => {
       console.log(error)
@@ -7090,9 +9935,9 @@ app.post('/getCompletedTaskListPM3', async (req, res) => {
 app.post('/getSpecificLDetailPM', async (req, res) => {
   console.log('getSpecificLDetailPM');
 
-  pool.query(`SELECT ns.id AS sales_id,  nl.customer_name, nl.customer_phone, nl.customer_email, nl.icno,  nl.company_name, nl.mailing_address, nl.residence_type, nl.residential_status, nl.address, ns.assigned_worker AS worker, ns.sub_sub_sign , 
+  pool.query(`SELECT ns.id AS sales_id,  nl.customer_name, nl.payment_mode, nl.customer_phone, nl.customer_email, nl.icno,  nl.company_name, nl.mailing_address, nl.residence_type, nl.residential_status, nl.address, ns.assigned_worker AS worker, ns.sub_sub_sign , 
   ns.total ,ns.sub_cust_sign, ns.status, ns.sales_status, ns.assigned_worker, nl.id AS lead_id, nsf.serviceform, nsf.id as serviceformid,
-  na.assigned_to4,
+  na.assigned_to4, nso.created_date as sof_created_date, ns.task_completed_date,
   
   (SELECT JSON_AGG(JSON_BUILD_OBJECT('checkid', sci.id, 'sales_id', sci.sales_id, 'check_in', sci.checkin_time, 
 									 'check_out', sci.check_out) ORDER BY sci.id DESC) FROM sub_check_in sci
@@ -7100,7 +9945,8 @@ app.post('/getSpecificLDetailPM', async (req, res) => {
   
   (SELECT JSON_AGG(JSON_BUILD_OBJECT('sap_id', sap_id, 'name', np.name, 'area', nsp.area, 'service', np.service, 'remark', nsp.remark,
    'task', nsp.task, 'from_date', nsp.from_date,  'from_date2', nsp.from_date2, 'sub_completed', nsp.sub_completed, 'sub_total', nsp.sub_total, 'total', nsp.total, 'discount', nsp.discount,
-   'services', nsp.services, 'sqft', nsp.sqft, 'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area, 'warranty', nsp.package_warranty, 'pu_status', nsp.pu_status )) FROM nano_sales_package nsp LEFT JOIN 
+   'services', nsp.services, 'sqft', nsp.sqft, 'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area, 'warranty', nsp.package_warranty, 'pu_status', nsp.pu_status,
+   'package', nsp.package_details, 'maintain_exist', nsp.maintain_exist, 'maintain_confirm', nsp.maintain_confirm, 'maintain_date', nsp.maintain_date)) FROM nano_sales_package nsp LEFT JOIN 
    nano_packages np ON nsp.package_id = np.id  WHERE sales_id = ns.id) AS sap,
 
    (SELECT JSON_AGG(JSON_BUILD_OBJECT('user_name', user_name, 'user_phone_no', user_phone_no, 'user_email', user_email))
@@ -7164,6 +10010,26 @@ app.post('/uploadServiceForm', (req, res) => {
 
 })
 
+app.post('/uploadWarrantyForm', (req, res) => {
+  console.log('uploadWarrantyForm')
+  let quoteid = req.body.quoteid
+  console.log(quoteid)
+  let now = new Date().getTime()
+  let now2 = new Date().getTime()
+
+  pool.query(`With updateform as (INSERT INTO nano_warranty_form (date_created, warrantyform, lead_id, appointment_id, sales_id) VALUES ($1, $2, $3, $4, $5) RETURNING id)
+      SELECT * FROM updateform`, [now, req.body.warrantyform, req.body.lead_id, req.body.appointment_id, req.body.sales_id]).then((result) => {
+    return res.status(200).send({ success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+  // }
+
+})
+
 app.post('/getServiceFormnumber', (req, res) => {
   console.log('getServiceFormnumber')
   // let now = new Date().getTime()
@@ -7187,6 +10053,47 @@ app.post('/getServiceFormByLead', (req, res) => {
     return res.status(800).send({ success: false })
   })
 })
+
+app.post('/getWarrantyFormByLead', (req, res) => {
+  console.log('getWarrantyFormByLead')
+  // let now = new Date().getTime()
+
+  pool.query(`SELECT * from nano_warranty_form WHERE lead_id = $1 ORDER BY id DESC`, [req.body.lead_id]).then((result) => {
+    return res.status(200).send({ data: result.rows, success: true })
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+})
+
+// uploadcomplaintform
+app.post('/uploadComplaintForm', (req, res) => {
+  console.log('uploadComplaintForm')
+
+  let now = new Date().getTime()
+
+  pool.query(`With updateform as (INSERT INTO subcon_complaint_form (date_created, complaintform, lead_id, sales_id) VALUES ($1, $2, $3, $4) RETURNING id)
+   SELECT * FROM updateform`, [now, req.body.latest_complaintform, req.body.lead_id, req.body.sales_id]).then((result) => {
+    return res.status(200).send({ success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+
+})
+
+app.post('/getComplaintFormByLead', (req, res) => {
+  console.log('getComplaintFormByLead')
+
+  pool.query(`SELECT * from subcon_complaint_form WHERE lead_id = $1 ORDER BY id DESC`, [req.body.lead_id]).then((result) => {
+    return res.status(200).send({ data: result.rows, success: true })
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ success: false })
+  })
+})
+
 
 
 //All task api
@@ -7307,28 +10214,115 @@ app.post('/getCompletedLDetailForSubConApp', async (req, res) => {
 app.post('/getSpecificLDetailForSub', async (req, res) => {
   console.log('getSpecificLDetailForSub');
 
-  pool.query(`SELECT ns.id AS sales_id,  nl.customer_name, nl.customer_phone, nl.address, ns.assigned_worker AS worker, ns.sub_sub_sign , 
-  ns.total ,ns.sub_cust_sign, ns.status, ns.sales_status, nl.id AS lead_id, ns.task_status, ns.final_reject_remark, ns.final_approval,
-  na.assigned_to4,
+  pool.query(`SELECT ns.id AS sales_id, nl.customer_name, nl.customer_phone, nl.address, ns.assigned_worker AS worker, 
+  ns.sub_sub_sign, ns.total, ns.sub_cust_sign, ns.status, ns.sales_status, nl.id AS lead_id, ns.task_status, 
+  ns.final_reject_remark, ns.final_approval, na.assigned_to4, ns.scaff_fee, ns.skylift_fee, ns.selected_photo,
 
-  
-  
   (SELECT JSON_AGG(JSON_BUILD_OBJECT('checkid', sci.id, 'sales_id', sci.sales_id, 'check_in', sci.checkin_time, 
-									 'check_out', sci.check_out) ORDER BY sci.id DESC) FROM sub_check_in sci
+                                     'check_out', sci.check_out, 'check_useruid', sci.check_useruid) ORDER BY sci.id DESC) 
+   FROM sub_check_in sci
    WHERE sci.sales_id = ns.id) AS check_detail,
-  
-  (SELECT JSON_AGG(JSON_BUILD_OBJECT('sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark,
-   'task', nsp.task, 'from_date', nsp.from_date,  'from_date2', nsp.from_date2, 'sub_completed', nsp.sub_completed, 'sub_total', nsp.sub_total, 'total', nsp.total, 'discount', nsp.discount,
-   'services', nsp.services, 'sqft', nsp.sqft, 'size', nsp.size, 'rate', nsp.rate, 'other_area', nsp.other_area, 'is_complaint', nsp.is_complaint, 'pu_status', nsp.pu_status )) FROM nano_sales_package nsp LEFT JOIN 
-   nano_packages np ON nsp.package_id = np.id  WHERE sales_id = ns.id) AS sap,
-   (SELECT * FROM
-    (SELECT JSON_AGG(JSON_BUILD_OBJECT('schedule_date', schedule_date::bigint)) FROM
-    (SELECT schedule_date FROM nano_schedule WHERE sales_id = $1 ORDER BY schedule_date ASC) p) agg) AS schedule,
-    (SELECT JSON_AGG(JSON_BUILD_OBJECT('name', u.user_name, 'phone', u.user_phone_no)) 
-     FROM nano_user u
-     WHERE u.uid IN (SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(na.assigned_to4::JSONB))) AS user_info
-  FROM nano_sales ns LEFT JOIN nano_leads nl ON ns.lead_id = nl.id LEFT JOIN nano_appointment na ON nl.id = na.lead_id
-  WHERE ns.id = $1`, [req.body.sales_id]).then((result) => {
+
+  (SELECT JSON_AGG(
+      JSON_BUILD_OBJECT(
+        'sap_id', nsp.sap_id, 
+        'place', nsp.area, 
+        'service', np.service, 
+        'remark', nsp.remark,
+        'task', nsp.task, 
+        'from_date', nsp.from_date,  
+        'from_date2', nsp.from_date2,
+        'from_date3', nsp.from_date3, 
+        'sub_completed', nsp.sub_completed, 
+        'sub_total', nsp.sub_total, 
+        'total', nsp.total, 
+        'discount', nsp.discount,
+        'services', nsp.services, 
+        'sqft', nsp.sqft, 
+        'size', nsp.size, 
+        'rate', nsp.rate, 
+        'other_area', nsp.other_area, 
+        'is_complaint', nsp.is_complaint, 
+        'pu_status', nsp.pu_status, 
+        'complaint_remark', nsc.complaint_remark
+      )
+    )
+   FROM nano_sales_package nsp 
+   LEFT JOIN nano_packages np ON nsp.package_id = np.id  
+   LEFT JOIN LATERAL (
+      SELECT nsc.complaint_remark
+      FROM nano_sub_complaint nsc
+      WHERE nsc.sales_id = ns.id 
+        AND nsc.complaint_id::jsonb @> JSONB_BUILD_ARRAY(JSONB_BUILD_OBJECT('sap_id', nsp.sap_id))
+      ORDER BY nsc.id DESC LIMIT 1
+   ) nsc ON true
+   WHERE nsp.sales_id = ns.id
+  ) AS sap,
+
+  (SELECT JSON_AGG(JSON_BUILD_OBJECT('schedule_date', schedule_date::bigint))
+   FROM (SELECT schedule_date FROM nano_schedule WHERE sales_id = $1 ORDER BY schedule_date ASC) p) AS schedule,
+
+  (SELECT JSON_AGG(JSON_BUILD_OBJECT('name', u.user_name, 'phone', u.user_phone_no)) 
+   FROM nano_user u
+   WHERE u.uid IN (SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(na.assigned_to4::JSONB))) AS user_info
+
+FROM nano_sales ns
+LEFT JOIN nano_leads nl ON ns.lead_id = nl.id 
+LEFT JOIN nano_appointment na ON nl.id = na.lead_id
+WHERE ns.id = $1;
+`, [req.body.sales_id]).then((result) => {
+
+    return res.status(200).send({ data: result.rows, success: true })
+
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ message: error, success: false })
+  })
+})
+
+app.post('/getSpecificLDetailForSub2', async (req, res) => {
+  console.log('getSpecificLDetailForSub2');
+
+  pool.query(`SELECT ns.id AS sales_id, nl.customer_name, nl.customer_phone, nl.address, ns.assigned_worker AS worker, 
+  ns.sub_sub_sign, ns.total, ns.sub_cust_sign, ns.status, ns.sales_status, nl.id AS lead_id, ns.task_status, 
+  ns.final_reject_remark, ns.final_approval, na.assigned_to4, ns.scaff_fee, ns.skylift_fee, ns.selected_photo, ns.m_state,
+
+  (SELECT JSON_AGG(JSON_BUILD_OBJECT('checkid', sci.id, 'sales_id', sci.sales_id, 'check_in', sci.checkin_time, 
+                                     'check_out', sci.check_out, 'check_useruid', sci.check_useruid) ORDER BY sci.id DESC) 
+   FROM sub_check_in sci
+   WHERE sci.sales_id = ns.id) AS check_detail,
+
+   (SELECT JSON_AGG(
+    TO_JSONB(nsp)
+      || JSONB_BUILD_OBJECT(
+        'service', np.service,
+        'complaint_remark', nsc.complaint_remark
+      )
+  )
+ FROM nano_sales_package nsp
+ LEFT JOIN nano_packages np ON nsp.package_id = np.id  
+ LEFT JOIN LATERAL (
+   SELECT nsc.complaint_remark
+   FROM nano_sub_complaint nsc
+   WHERE nsc.sales_id = ns.id 
+     AND nsc.complaint_id::jsonb @> JSONB_BUILD_ARRAY(JSONB_BUILD_OBJECT('sap_id', nsp.sap_id))
+   ORDER BY nsc.id DESC LIMIT 1
+ ) nsc ON true
+ WHERE nsp.sales_id = ns.id
+) AS sap,
+
+  (SELECT JSON_AGG(JSON_BUILD_OBJECT('schedule_date', schedule_date::bigint))
+   FROM (SELECT schedule_date FROM nano_schedule WHERE sales_id = $1 ORDER BY schedule_date ASC) p) AS schedule,
+
+  (SELECT JSON_AGG(JSON_BUILD_OBJECT('name', u.user_name, 'phone', u.user_phone_no)) 
+   FROM nano_user u
+   WHERE u.uid IN (SELECT value::text FROM JSONB_ARRAY_ELEMENTS_TEXT(na.assigned_to4::JSONB))) AS user_info
+
+FROM nano_sales ns
+LEFT JOIN nano_leads nl ON ns.lead_id = nl.id 
+LEFT JOIN nano_appointment na ON nl.id = na.lead_id
+WHERE ns.id = $1;
+`, [req.body.sales_id]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -7361,11 +10355,14 @@ app.post('/updateSubCompleted2', async (req, res) => {
   if (!req.body.sub_complaint_video) {
     req.body.sub_complaint_video = JSON.stringify([])
   }
+  if (req.body.sub_complaint_remark == null) {
+    req.body.sub_complaint_remark = JSON.stringify([])
+  }
   let now = new Date().getTime()
   pool.query(`
   SELECT user_name FROM sub_user WHERE uid = $1
 `, [req.body.uid]).then((result) => {
-    let by = result.rows.length > 0 ? result.rows[0]['user_name'] : 'no name'
+    let by = result.rows[0]['user_name']
 
     pool.query(`WITH updatesaptask AS (UPDATE nano_sales_package SET 
       sub_completed = sub_completed::jsonb || $1::jsonb, 
@@ -7373,12 +10370,14 @@ app.post('/updateSubCompleted2', async (req, res) => {
       sub_video = $3,
       sub_complaint_image = $12,
       sub_complaint_video = $13, 
-      sub_remark = $4 WHERE sap_id = $5 RETURNING *),
+      sub_remark = $4,
+      sub_complaint_remark = $14 
+      WHERE sap_id = $5 RETURNING *),
     insertactivitylog as (INSERT INTO nano_activity_log (lead_id, sales_id, activity_time, activity_by, remark, 
       activity_type) VALUES ($6, $7 ,$8, $9, $10, $11))
     SELECT * FROM updatesaptask`,
       [req.body.sub_completed, req.body.sub_image, req.body.sub_video, req.body.sub_remark, req.body.sap_id, req.body.lead_id, req.body.sales_id, now, req.body.uid,
-      'Status of subcon task with id-' + req.body.sap_id + 'has been Updated by ' + by, 'Subcon/Task', req.body.sub_complaint_image, req.body.sub_complaint_video]).then((result) => {
+      'Task ' + req.body.area + ' has been Updated by ' + by, 'Subcon/Task', req.body.sub_complaint_image, req.body.sub_complaint_video, req.body.sub_complaint_remark]).then((result) => {
 
         return res.status(200).send({ success: true })
 
@@ -7392,11 +10391,76 @@ app.post('/updateSubCompleted2', async (req, res) => {
   })
 })
 
+app.post('/updateSubCompleted3', async (req, res) => {
+  console.log('updateSubCompleted3');
+  if (!req.body.sub_complaint_image) {
+    req.body.sub_complaint_image = JSON.stringify([])
+  }
+  if (!req.body.sub_complaint_video) {
+    req.body.sub_complaint_video = JSON.stringify([])
+  }
+  if (req.body.sub_complaint_remark == null) {
+    req.body.sub_complaint_remark = JSON.stringify([])
+  }
+  let now = new Date().getTime()
+  pool.query(`
+  SELECT user_name FROM sub_user WHERE uid = $1
+`, [req.body.uid]).then((result) => {
+    let by = result.rows[0]['user_name']
+
+    pool.query(`WITH updatesaptask AS (UPDATE nano_sales_package SET 
+      sub_completed = sub_completed::jsonb || $1::jsonb, 
+      sub_image = $2, 
+      sub_video = $3,
+      sub_complaint_image = $12,
+      sub_complaint_video = $13, 
+      sub_remark = $4,
+      sub_complaint_remark = $14,
+      sub_maintain_image = $15,
+      sub_maintain_video = $16, 
+      sub_maintain_remark = $17,
+      maintain_status = $18
+      maintain_complete = $19
+      maintain_complete_date = $20
+      WHERE sap_id = $5 RETURNING *),
+    insertactivitylog as (INSERT INTO nano_activity_log (lead_id, sales_id, activity_time, activity_by, remark, 
+      activity_type) VALUES ($6, $7 ,$8, $9, $10, $11))
+    SELECT * FROM updatesaptask`,
+      [req.body.sub_completed, req.body.sub_image, req.body.sub_video, req.body.sub_remark, req.body.sap_id, req.body.lead_id, req.body.sales_id, now, req.body.uid,
+      'Task ' + req.body.area + ' has been Updated by ' + by, 'Subcon/Task', req.body.sub_complaint_image, req.body.sub_complaint_video, req.body.sub_complaint_remark,
+      req.body.sub_maintain_image, req.body.sub_maintain_video, req.body.sub_maintain_remark, req.body.sub_maintain_status, req.body.maintain_complete, req.body.maintain_complete_date]).then((result) => {
+
+        return res.status(200).send({ success: true })
+
+      }).catch((error) => {
+        console.log(error)
+        return res.status(800).send({ message: error, success: false })
+      })
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ message: error, success: false })
+  })
+})
+
+app.post('/updateServiceForm', async (req, res) => {
+  console.log('updateServiceForm');
+  let date = new Date().getTime()
+
+  pool.query(`UPDATE subcon_service_form SET form_approval = $2, form_reject_remark = $3, form_status = $4,  form_approval_date = $5 WHERE id = $1`,
+    [req.body.id, req.body.form_approval, req.body.reject, req.body.form_status, date]).then((result) => {
+
+      return res.status(200).send({ success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ message: error, success: false })
+    })
+})
 
 app.post('/updateSubSubSign', async (req, res) => {
   console.log('updateSubSubSign');
 
-  pool.query(`UPDATE nano_sales SET sub_sub_sign =  $1 WHERE id = $2`,
+  pool.query(`UPDATE nano_sales SET sub_sub_sign = $1 WHERE id = $2`,
     [req.body.sub_sub_sign, req.body.sales_id]).then((result) => {
 
       return res.status(200).send({ success: true })
@@ -7487,7 +10551,7 @@ app.post('/updateFinalStatus', async (req, res) => {
 `, [req.body.from_id]).then((result) => {
     let by = result.rows[0]['user_name']
 
-    pool.query(`WITH updatestatus as (UPDATE nano_sales SET status =  true WHERE id = $6 RETURNING *),
+    pool.query(`WITH updatestatus as (UPDATE nano_sales SET status = true, final_approval = null, task_completed_date = $4 WHERE id = $6 RETURNING *),
   insertnotificationhis as (INSERT INTO nano_notification_history (to_id, from_id, message_type, his_date, lead_id, sales_id, title, body) VALUES($1, $2, $3, $4, $5, $6, $7, $8)),
   insertactivitylog as (INSERT INTO nano_activity_log (lead_id, sales_id, activity_time, activity_by, remark, activity_type) 
   VALUES ($5, $6 ,$4, $2, $9, $10))
@@ -7505,6 +10569,34 @@ app.post('/updateFinalStatus', async (req, res) => {
     return res.status(800).send({ message: error, success: false })
   })
 })
+
+app.post('/updateMaintainFinal', async (req, res) => {
+  console.log('updateMaintainFinal');
+  let now = new Date().getTime()
+  pool.query(`
+  SELECT user_name FROM sub_user WHERE uid = $1
+`, [req.body.from_id]).then((result) => {
+    let by = result.rows[0]['user_name']
+
+    pool.query(`WITH updatestatus as (UPDATE nano_sales SET status = true, final_approval = null, maintain_completed_date = $4 WHERE id = $6 RETURNING *),
+  insertnotificationhis as (INSERT INTO nano_notification_history (to_id, from_id, message_type, his_date, lead_id, sales_id, title, body) VALUES($1, $2, $3, $4, $5, $6, $7, $8)),
+  insertactivitylog as (INSERT INTO nano_activity_log (lead_id, sales_id, activity_time, activity_by, remark, activity_type) 
+  VALUES ($5, $6 ,$4, $2, $9, $10))
+  SELECT * FROM updatestatus`,
+      [req.body.to_id, req.body.from_id, req.body.message_type, now, req.body.lead_id, req.body.sales_id, req.body.title, req.body.body, 'All Task Done, Updated by ' + by, 'Subcon/TaskDone']).then((result) => {
+
+        return res.status(200).send({ success: true })
+
+      }).catch((error) => {
+        console.log(error)
+        return res.status(800).send({ message: error, success: false })
+      })
+  }).catch((error) => {
+    console.log(error)
+    return res.status(800).send({ message: error, success: false })
+  })
+})
+
 
 
 //warranty
@@ -8208,19 +11300,18 @@ app.post('/postponeSalesByWorker', (req, res) => {
   console.log('postponeSalesByWorker')
   // let now = new Date().getTime()
 
-  pool.query(`UPDATE nano_sales SET task_status = false, subcon_state = 'Cancelled', task_postpone_remark = $2 WHERE  id = $1`,
-    [req.body.sales_id, req.body.remark]).then((result) => {
+  pool.query(`UPDATE nano_sales SET task_status = false, subcon_state = 'Cancelled', task_postpone_remark = $2, is_postpone = $3 WHERE  id = $1`,
+    [req.body.sales_id, req.body.remark, true]).then((result) => {
       req.body.activity_time = new Date().getTime()
 
 
-      pool.query(`SELECT user_name FROM nano_user WHERE uid = $1`,
+      pool.query(`SELECT * FROM sub_user WHERE uid = $1`,
         [req.body.uid]).then((result) => {
 
           let by = result.rows[0]['user_name']
-          pool.query(`INSERT INTO nano_activity_log (lead_id, activity_time, activity_by, remark, 
-          activity_type) VALUES ($1, $2 ,$3, $4, $5)`,
-            [req.body.lead_id, req.body.activity_time, req.body.uid, 'Task postponed by ' + by + '(Worker)\n -' + req.body.remark, 'Subcon/Postpone']).then((result) => {
-
+          pool.query(`INSERT INTO nano_activity_log (lead_id, activity_time, activity_by, remark, activity_type, sales_id) VALUES ($1, $2 ,$3, $4, $5, $6)`,
+            [req.body.lead_id, req.body.activity_time, req.body.uid, 'Task postponed by ' + by + '(Worker)\n - ' + req.body.title, 'Subcon/Postpone', req.body.sales_id]).then((result) => {
+              console.log('insert log');
               return res.status(200).send({ success: true })
 
             }).catch((error) => {
@@ -8337,14 +11428,14 @@ app.post('/uploadGenSalesOrderForm', (req, res) => {
   if (quoteid) {
     pool.query(`SELECT user_name FROM nano_user WHERE uid = $1`, [req.body.userid]).then((result) => {
       let by = result['rows'][0]['user_name']
-      pool.query(`With updateform as (UPDATE nano_sales_order SET(created_date, orderform, isvoid) = ($1, $2, false) WHERE id = $4 RETURNING id),
+      pool.query(`With updateform as (UPDATE nano_sales_order SET(created_date, orderform, isvoid, orderform_breakdown) = ($1, $2, false, $13) WHERE id = $4 RETURNING id),
     updateacticitylog as (INSERT INTO nano_activity_log (lead_id, activity_time, activity_by, remark, activity_type) VALUES ($3, $9 ,$6, $7, $8)),
     updatesalesstatus as (UPDATE nano_sales SET sales_status = $10 WHERE id = $5),
     updateleadlabel as (UPDATE nano_leads SET (label_m, label_s) = ($11, $12) WHERE id = $3),
     insertscnotification as (INSERT INTO nano_sc_notification (sn_created_date, lead_id, sn_remark, uid, to_id) 
   VALUES ($9, $3, $7, $6, (SELECT sales_coordinator FROM nano_leads WHERE id = $3)))
       SELECT * FROM updateform`, [now, req.body.latest_orderform, req.body.lead_id, quoteid, req.body.sales_id, req.body.userid, 'Sales Order Form created by ' + by,
-        'Sales Order', now2, req.body.sales_status, 55, 47]).then((result) => {
+        'Sales Order', now2, req.body.sales_status, 55, 47, req.body.breakdown_orderform]).then((result) => {
           return res.status(200).send({ success: true })
 
         }).catch((error) => {
@@ -8960,9 +12051,42 @@ app.post('/updateFinalApproval2', async (req, res) => {
   VALUES ($5, $2, $4, $7, $6, (SELECT sales_coordinator FROM nano_leads WHERE id = $4)))
   SELECT * FROM updatefinalappro`,
     [req.body.final_approval, req.body.sales_id, req.body.final_reject_remark, req.body.lead_id, now, req.body.uid, req.body.log,
-    req.body.activity_type == 9 ? 'Installation Approval' : 'Unknown', (req.body.final_reject_title ? req.body.final_reject_title : null), (req.body.final_reject_area ? req.body.final_reject_area : kosong)]).then((result) => {
+    req.body.activity_type == 9 ? 'Installation Approval' : 'Unknown', (req.body.final_reject_title ? req.body.final_reject_title : null), (req.body.final_reject_area ? req.body.final_reject_area : kosong)]).then(async (result) => {
 
-      return res.status(200).send({ success: true })
+      if (req.body.final_approval == true) {
+        try {
+          const salesPackages = await pool.query(`SELECT * FROM nano_sales_package WHERE sales_id = $1`, [req.body.sales_id]);
+
+          const promises = salesPackages.rows.map(async (row) => {
+            if (row.maintain_exist) {
+              const maintainDate = row.package_details.maintain_date.map(entry => {
+                const newDate = new Date(now);
+                newDate.setFullYear(newDate.getFullYear() + entry.year);
+                newDate.setMonth(newDate.getMonth() + entry.month);
+                const newTimestamp = newDate.getTime();
+                return {
+                  id: entry.id,
+                  date: newTimestamp,
+                  status: 'Pending'
+                };
+              });
+
+              await pool.query(`UPDATE nano_sales_package SET maintain_confirm = $1, maintain_date = $2 WHERE sap_id = $3`, [true, JSON.stringify(maintainDate), row.sap_id]);
+            }
+          });
+
+          await Promise.all(promises);
+          return res.status(200).send({ success: true });
+
+        } catch (error) {
+          console.log(error);
+          return res.status(500).send({ message: error.message, success: false });
+        }
+
+      } else {
+        return res.status(200).send({ success: true });
+      }
+
 
     }).catch((error) => {
       console.log(error)
@@ -9039,8 +12163,8 @@ app.post('/insertNanoSubComplaint2', async (req, res) => {
 app.post('/updateNanoSubComplaint', async (req, res) => {
   console.log('updateNanoSubComplaint');
 
-  pool.query(`UPDATE nano_sub_complaint SET (complaint_remark, complaint_status) = ($2, $3) WHERE id = $1`,
-    [req.body.complaint_id, req.body.complaint_remark, req.body.complaint_status]).then((result) => {
+  pool.query(`UPDATE nano_sub_complaint SET (reject_remark, complaint_status) = ($2, $3) WHERE id = $1`,
+    [req.body.complaint_id, req.body.reject_remark, req.body.complaint_status]).then((result) => {
 
       return res.status(200).send({ success: true })
 
@@ -9117,6 +12241,21 @@ app.post('/getComplaintDetailByLead', async (req, res) => {
     console.log(error)
     return res.status(800).send({ message: error, success: false })
   })
+})
+
+app.post('/updateComplaintDetailRemark', (req, res) => {
+  console.log('updateComplaintDetailRemark');
+
+  pool.query(`UPDATE nano_sub_complaint SET complaint_remark = $2 WHERE id = $1`,
+    [req.body.id, req.body.complaint_remark]).then((result) => {
+
+      return res.status(200).send({ data: result.rows, success: true })
+
+    }).catch((error) => {
+      console.log(error)
+      return res.status(800).send({ error: error.message, success: false })
+    })
+
 })
 
 
@@ -9284,6 +12423,217 @@ app.get('/getCompletedJobAll', (req, res) => {
       return res.status(800).send({ success: false })
     })
 })
+
+app.post('/insertTarget', (req, res) => {
+  console.log('insertTarget');
+
+  const { target } = req.body;
+
+  pool.query(
+    `INSERT INTO nano_target (target) VALUES ($1)`,
+    [target]
+  ).then(() => {
+    return res.status(200).send({ success: true });
+  }).catch((error) => {
+    console.log(error);
+    return res.status(800).send({ success: false });
+  });
+});
+
+app.post('/updateTarget', (req, res) => {
+  console.log('updateTarget');
+
+  const { daily, days, target, id } = req.body;
+
+  pool.query(
+    `UPDATE nano_target SET daily = $1, days = $2, target = $3 WHERE id = $4`,
+    [daily, days, target, id]
+  ).then(() => {
+    return res.status(200).send({ success: true });
+  }).catch((error) => {
+    console.log(error);
+    return res.status(800).send({ success: false });
+  });
+});
+
+app.post('/getTargetByType', (req, res) => {
+  console.log('getTargetByType');
+
+  const { type } = req.body;
+
+  pool.query(`SELECT * FROM nano_target WHERE type = $1`, [type])
+    .then((result) => {
+      return res.status(200).send({ success: true, data: result.rows[0] });
+    })
+    .catch((error) => {
+      console.log(error);
+      return res.status(800).send({ success: false });
+    });
+});
+
+// Get favorites for a lead
+app.post('/getGalleryFavorites', async (req, res) => {
+  console.log('getGalleryFavorites');
+  const { lead_id, by } = req.body;
+
+  try {
+    const result = await pool.query(
+      `SELECT image FROM nano_gallery 
+       WHERE lead_id = $1 AND by = $2 AND type = 'favourite'`,
+      [lead_id, by]
+    );
+
+    res.status(200).send({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Error getting favorites:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to get favorites'
+    });
+  }
+});
+
+// Insert favorite (your existing endpoint with slight modification)
+app.post('/insertGallery', async (req, res) => {
+  console.log('insertGallery');
+  const { image, type, by, lead_id, format } = req.body;
+  const date = new Date().getTime();
+
+  try {
+    // Check if already exists
+    const existing = await pool.query(
+      `SELECT id FROM nano_gallery 
+       WHERE image = $1 AND lead_id = $2 AND type = 'favourite'`,
+      [image, lead_id]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(200).send({
+        success: true,
+        id: existing.rows[0].id,
+        message: 'Already in favorites'
+      });
+    }
+
+    // Insert new favorite
+    const result = await pool.query(
+      `INSERT INTO nano_gallery (image, type, by, lead_id, date_created, format)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [image, type, by, lead_id, date, format]
+    );
+
+    res.status(201).send({
+      success: true,
+      id: result.rows[0].id
+    });
+  } catch (error) {
+    console.error('Error adding favorite:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to add favorite'
+    });
+  }
+});
+
+// Remove favorite
+app.post('/removeGalleryFavorite', async (req, res) => {
+  console.log('removeGalleryFavorite');
+  const { image, lead_id } = req.body;
+
+  try {
+    await pool.query(
+      `DELETE FROM nano_gallery 
+       WHERE image = $1 AND lead_id = $2 AND type = 'favourite'`,
+      [image, lead_id]
+    );
+
+    res.status(200).send({ success: true });
+  } catch (error) {
+    console.error('Error removing favorite:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to remove favorite'
+    });
+  }
+});
+
+// Remove favorite
+app.post('/removeGalleryAdmin', async (req, res) => {
+  console.log('removeGalleryAdmin');
+  const { image } = req.body;
+
+  try {
+    await pool.query(
+      `DELETE FROM nano_gallery WHERE image = $1`,
+      [image]
+    );
+
+    res.status(200).send({ success: true });
+  } catch (error) {
+    console.error('Error removing favorite:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to remove favorite'
+    });
+  }
+});
+
+app.post('/getGalleryByUid', (req, res) => {
+  console.log('getGalleryByUid');
+
+  const { by } = req.body;
+
+  if (!by) {
+    return res.status(400).send({
+      success: false,
+      message: 'User UID (by) is required'
+    });
+  }
+
+  pool.query(`SELECT * FROM nano_gallery WHERE by = $1 ORDER BY date_created DESC`, [by])
+    .then((result) => {
+      // Initialize all four categories
+      const categorizedMedia = {
+        image_u: [], // Uploaded images
+        image_f: [], // Favorite images
+        video_u: [], // Uploaded videos
+        video_f: []  // Favorite videos
+      };
+
+      // Categorize each media item
+      result.rows.forEach(item => {
+        if (item.format === 'image') {
+          if (item.type === 'favourite') {
+            categorizedMedia.image_f.push(item.image);
+          } else {
+            categorizedMedia.image_u.push(item.image);
+          }
+        } else if (item.format === 'video') {
+          if (item.type === 'favourite') {
+            categorizedMedia.video_f.push(item.image);
+          } else {
+            categorizedMedia.video_u.push(item.image);
+          }
+        }
+      });
+
+      return res.status(200).send({
+        success: true,
+        data: categorizedMedia
+      });
+    })
+    .catch((error) => {
+      console.error('Database error:', error);
+      return res.status(500).send({
+        success: false,
+        message: 'Error fetching gallery data'
+      });
+    });
+});
+
 
 server.listen(443, function () {
   console.log('server start');
