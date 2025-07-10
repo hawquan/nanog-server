@@ -4,7 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "dev": "NODE_ENV=development node index.js",
+    "prod": "NODE_ENV=production node index.js",
+    "start:dev": "NODE_ENV=development PORT=3000 node index.js",
+    "start:prod": "NODE_ENV=production PORT=443 HTTPS_ENABLED=true node index.js"
   },
   "author": "",
   "license": "ISC",

@@ -2,10 +2,10 @@ require('dotenv').config();
 
 
 const aws = require('aws-sdk')
-const region = 'ap-southeast-1'
-const bucketName = 'nanogbucket/nano'
-const accessKeyId = process.env.AWS_ACCESS_KEY
-const secretAccessKey = process.env.AWS_SECRET_KEY
+const region = process.env.AWS_BUCKET_REGION || 'ap-southeast-1'
+const bucketName = process.env.AWS_BUCKET_NAME || 'nanogbucket/nano'
+const accessKeyId = process.env.AWS_ACCESS_KEY || 'AKIA4FJWF7YCVSZJKLFE'
+const secretAccessKey = process.env.AWS_SECRET_KEY || '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'
 
 const axios = require('axios');
 

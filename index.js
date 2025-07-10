@@ -1,3 +1,6 @@
+// Load environment variables
+require('dotenv').config();
+
 const express = require('express')
 const fs = require('fs')
 const app = express();
@@ -14,14 +17,20 @@ const axios = require('axios');
 const bodyParser = require('body-parser');
 var serviceAccount = require("./serviceAccountKey.json");
 
+// Environment configuration
+const isProduction = process.env.NODE_ENV === 'production';
+const isDevelopment = process.env.NODE_ENV === 'development';
+
+console.log(`Running in ${process.env.NODE_ENV} mode`);
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://nanog-e3f80-default-rtdb.firebaseio.com"
+  databaseURL: process.env.FIREBASE_DATABASE_URL || "https://nanog-e3f80-default-rtdb.firebaseio.com"
 });
 
 
 const corsOptions = {
-  origin: "*",
+  origin: process.env.CORS_ORIGIN || "*",
   credentials: true
 };
 
@@ -31,19 +40,20 @@ app.use(cors(corsOptions));
 app.use(express.static(__dirname + '/public'));
 // app.use(express.json({ limit: '100mb' }));
 // app.use(express.urlencoded({ limit: '100mb', extended: true }));
-app.use(express.json({ limit: '1024mb' }));
-app.use(express.urlencoded({ limit: '1024mb', extended: true }));
+const requestLimit = process.env.REQUEST_LIMIT || '1024mb';
+app.use(express.json({ limit: requestLimit }));
+app.use(express.urlencoded({ limit: requestLimit, extended: true }));
 
 //qwer1234
 //root
 
 const config = {
-  user: 'postgres',
-  database: 'postgres',
-  password: 'root',
-  port: 5432,
-  host: 'localhost',
-  max: 100
+  user: process.env.DB_USER || 'postgres',
+  database: process.env.DB_NAME || 'postgres',
+  password: process.env.DB_PASSWORD || 'root',
+  port: parseInt(process.env.DB_PORT) || 5432,
+  host: process.env.DB_HOST || 'localhost',
+  max: parseInt(process.env.DB_MAX_CONNECTIONS) || 100
 };
 
 
@@ -63,18 +73,25 @@ pg.types.setTypeParser(701, function (val) {
 
 // Check if SSL certificates exist for HTTPS, otherwise use HTTP for local development
 let server;
-try {
-  server = require('https').createServer({
-    key: fs.readFileSync('C:/Certbot/live/api.nanogapp.com/privkey.pem'),
-    cert: fs.readFileSync('C:/Certbot/live/api.nanogapp.com/cert.pem'),
-    ca: [
-      fs.readFileSync('C:/Certbot/live/api.nanogapp.com/chain.pem'),
-      fs.readFileSync('C:/Certbot/live/api.nanogapp.com/fullchain.pem'),
-    ]
-  }, app);
-  console.log('HTTPS server created with SSL certificates');
-} catch (error) {
-  console.log('SSL certificates not found, using HTTP for local development');
+const httpsEnabled = process.env.HTTPS_ENABLED === 'true';
+
+if (httpsEnabled && isProduction) {
+  try {
+    server = require('https').createServer({
+      key: fs.readFileSync(process.env.SSL_KEY_PATH || 'C:/Certbot/live/api.nanogapp.com/privkey.pem'),
+      cert: fs.readFileSync(process.env.SSL_CERT_PATH || 'C:/Certbot/live/api.nanogapp.com/cert.pem'),
+      ca: [
+        fs.readFileSync(process.env.SSL_CHAIN_PATH || 'C:/Certbot/live/api.nanogapp.com/chain.pem'),
+        fs.readFileSync(process.env.SSL_FULLCHAIN_PATH || 'C:/Certbot/live/api.nanogapp.com/fullchain.pem'),
+      ]
+    }, app);
+    console.log('HTTPS server created with SSL certificates');
+  } catch (error) {
+    console.log('SSL certificates not found, falling back to HTTP');
+    server = require('http').createServer(app);
+  }
+} else {
+  console.log('Using HTTP server for development');
   server = require('http').createServer(app);
 }
 
@@ -12890,10 +12907,15 @@ app.post('/getWorkerPerformance', async (req, res) => {
 });
 
 
-// Use port 3000 for local development, 443 for production
-const PORT = process.env.NODE_ENV === 'production' ? 443 : 3000;
+// Use environment variable for port, with fallbacks
+const PORT = process.env.PORT || (isProduction ? 443 : 3000);
 server.listen(PORT, function () {
   console.log(`Server started on port ${PORT}`);
-  console.log(`Local development URL: http://localhost:${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV}`);
+  if (isDevelopment) {
+    console.log(`Local development URL: http://localhost:${PORT}`);
+  } else {
+    console.log(`Production server running on port ${PORT}`);
+  }
 });
 
