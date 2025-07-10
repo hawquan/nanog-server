@@ -61,14 +61,22 @@ pg.types.setTypeParser(701, function (val) {
   return parseFloat(val);
 });
 
-const server = require('https').createServer({
-  key: fs.readFileSync('C:/Certbot/live/api.nanogapp.com/privkey.pem'),
-  cert: fs.readFileSync('C:/Certbot/live/api.nanogapp.com/cert.pem'),
-  ca: [
-    fs.readFileSync('C:/Certbot/live/api.nanogapp.com/chain.pem'),
-    fs.readFileSync('C:/Certbot/live/api.nanogapp.com/fullchain.pem'),
-  ]
-}, app);
+// Check if SSL certificates exist for HTTPS, otherwise use HTTP for local development
+let server;
+try {
+  server = require('https').createServer({
+    key: fs.readFileSync('C:/Certbot/live/api.nanogapp.com/privkey.pem'),
+    cert: fs.readFileSync('C:/Certbot/live/api.nanogapp.com/cert.pem'),
+    ca: [
+      fs.readFileSync('C:/Certbot/live/api.nanogapp.com/chain.pem'),
+      fs.readFileSync('C:/Certbot/live/api.nanogapp.com/fullchain.pem'),
+    ]
+  }, app);
+  console.log('HTTPS server created with SSL certificates');
+} catch (error) {
+  console.log('SSL certificates not found, using HTTP for local development');
+  server = require('http').createServer(app);
+}
 
 app.get('/', (req, res) => {
   // console.log('spaming');
@@ -12634,9 +12642,258 @@ app.post('/getGalleryByUid', (req, res) => {
     });
 });
 
+// Get workers ranked by complaint count
+app.post('/getWorkersByRanking', async (req, res) => {
+  console.log('getWorkersByRanking');
+  
+  try {
+    // Get all subcon workers with their complaint counts
+    const result = await pool.query(`
+      SELECT 
+        su.user_id,
+        su.user_name,
+        su.user_role,
+        su.user_phone_no,
+        su.user_email,
+        su.profile_image,
+        su.employee_id,
+        su.login_id,
+        su.company_id,
+        COALESCE(complaint_stats.complaint_count, 0) as complaint_count,
+        COALESCE(appointment_stats.appointment_count, 0) as appointment_count,
+        CASE 
+          WHEN COALESCE(complaint_stats.complaint_count, 0) = 0 THEN 'Best Worker'
+          WHEN COALESCE(complaint_stats.complaint_count, 0) <= 2 THEN 'Good Worker'
+          WHEN COALESCE(complaint_stats.complaint_count, 0) <= 5 THEN 'Average Worker'
+          ELSE 'Poor Worker'
+        END as ranking_category
+      FROM sub_user su
+      LEFT JOIN (
+        SELECT 
+          worker_name,
+          COUNT(*) as complaint_count
+        FROM (
+          SELECT 
+            elem->>'name' as worker_name
+          FROM nano_sub_complaint nsc
+          JOIN nano_sales ns ON nsc.sales_id = ns.id
+          CROSS JOIN LATERAL jsonb_array_elements(ns.assigned_worker::jsonb) elem
+          WHERE ns.assigned_worker IS NOT NULL 
+            AND ns.assigned_worker::text != '[]'
+            AND ns.assigned_worker::text != 'null'
+        ) worker_complaints
+        WHERE worker_name IS NOT NULL AND worker_name != ''
+        GROUP BY worker_name
+      ) complaint_stats ON su.user_name = complaint_stats.worker_name
+      LEFT JOIN (
+        SELECT 
+          assigned_to as worker_id,
+          COUNT(*) as appointment_count
+        FROM nano_appointment 
+        WHERE assigned_to IS NOT NULL 
+          AND assigned_to::text != '[]' 
+          AND assigned_to::text != ''
+          AND assigned_to::text NOT LIKE '[%]'
+        GROUP BY assigned_to
+      ) appointment_stats ON su.user_id::text = appointment_stats.worker_id
+      WHERE su.active = true
+      ORDER BY complaint_count ASC, appointment_count DESC
+    `);
 
-server.listen(443, function () {
-  console.log('server start');
+    // Separate workers into categories
+    const bestWorkers = result.rows.filter(worker => worker.complaint_count === 0);
+    const worstWorkers = result.rows.filter(worker => worker.complaint_count > 0)
+                                   .sort((a, b) => b.complaint_count - a.complaint_count);
 
+    res.status(200).send({
+      success: true,
+      data: {
+        best_workers: bestWorkers.slice(0, 10), // Top 10 best workers
+        worst_workers: worstWorkers.slice(0, 10), // Top 10 worst workers
+        all_workers: result.rows,
+        summary: {
+          total_workers: result.rows.length,
+          best_workers_count: bestWorkers.length,
+          workers_with_complaints: worstWorkers.length,
+          total_complaints: result.rows.reduce((sum, worker) => sum + worker.complaint_count, 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error getting workers by ranking:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to get workers ranking'
+    });
+  }
+});
+
+// Get worker performance details
+app.post('/getWorkerPerformance', async (req, res) => {
+  console.log('getWorkerPerformance');
+  const { worker_id } = req.body;
+
+  // Debug log for received worker_id
+  console.log('Received worker_id:', worker_id, 'Type:', typeof worker_id);
+
+  if (!worker_id) {
+    return res.status(400).send({
+      success: false,
+      message: 'Worker ID is required'
+    });
+  }
+
+  try {
+    // Get worker details with performance metrics
+    const result = await pool.query(`
+      SELECT 
+        su.user_id,
+        su.user_name,
+        su.user_role,
+        su.user_phone_no,
+        su.user_email,
+        su.profile_image,
+        su.employee_id,
+        su.login_id,
+        su.company_id,
+        COALESCE(complaint_stats.complaint_count, 0) as complaint_count,
+        COALESCE(appointment_stats.appointment_count, 0) as appointment_count,
+        COALESCE(completed_stats.completed_count, 0) as completed_count,
+        CASE 
+          WHEN COALESCE(complaint_stats.complaint_count, 0) = 0 THEN 'Best Worker'
+          WHEN COALESCE(complaint_stats.complaint_count, 0) <= 2 THEN 'Good Worker'
+          WHEN COALESCE(complaint_stats.complaint_count, 0) <= 5 THEN 'Average Worker'
+          ELSE 'Poor Worker'
+        END as ranking_category,
+        CASE 
+          WHEN COALESCE(appointment_stats.appointment_count, 0) > 0 
+          THEN ROUND((COALESCE(completed_stats.completed_count, 0)::numeric / COALESCE(appointment_stats.appointment_count, 0)::numeric) * 100::numeric, 2)::numeric
+          ELSE 0
+        END as completion_rate
+      FROM sub_user su
+      LEFT JOIN (
+        SELECT 
+          worker_name,
+          COUNT(*) as complaint_count
+        FROM (
+          SELECT 
+            elem->>'name' as worker_name
+          FROM nano_sub_complaint nsc
+          JOIN nano_sales ns ON nsc.sales_id = ns.id
+          CROSS JOIN LATERAL jsonb_array_elements(ns.assigned_worker::jsonb) elem
+          WHERE ns.assigned_worker IS NOT NULL 
+            AND ns.assigned_worker::text != '[]'
+            AND ns.assigned_worker::text != 'null'
+        ) worker_complaints
+        WHERE worker_name IS NOT NULL AND worker_name != ''
+        GROUP BY worker_name
+      ) complaint_stats ON su.user_name = complaint_stats.worker_name
+      LEFT JOIN (
+        SELECT 
+          assigned_to as worker_id,
+          COUNT(*) as appointment_count
+        FROM nano_appointment 
+        WHERE assigned_to IS NOT NULL 
+          AND assigned_to::text != '[]' 
+          AND assigned_to::text != ''
+          AND assigned_to::text NOT LIKE '[%]'
+        GROUP BY assigned_to
+      ) appointment_stats ON su.user_id::text = appointment_stats.worker_id
+      LEFT JOIN (
+        SELECT 
+          assigned_to as worker_id,
+          COUNT(*) as completed_count
+        FROM nano_appointment 
+        WHERE assigned_to IS NOT NULL 
+          AND assigned_to::text != '[]' 
+          AND assigned_to::text != ''
+          AND assigned_to::text NOT LIKE '[%]'
+          AND appointment_status = true
+        GROUP BY assigned_to
+      ) completed_stats ON su.user_id::text = completed_stats.worker_id
+      WHERE su.user_id = $1
+    `, [worker_id]);
+
+    // Debug log for query result
+    console.log('Worker query result rows:', result.rows.length);
+    console.log('Worker query result:', result.rows);
+
+    if (result.rows.length === 0) {
+      return res.status(404).send({
+        success: false,
+        message: 'Worker not found'
+      });
+    }
+
+    const worker = result.rows[0];
+
+    // Get recent complaints for this worker
+    const complaintsResult = await pool.query(`
+      SELECT 
+        nsc.id,
+        nsc.created_date,
+        nsc.complaint_remark,
+        nsc.complaint_status,
+        nsc.complaint_image,
+        nsc.complaint_video,
+        nsc.sub_complaint_details
+      FROM nano_sub_complaint nsc
+      JOIN nano_sales ns ON nsc.sales_id = ns.id
+      WHERE EXISTS (
+        SELECT 1 FROM jsonb_array_elements(ns.assigned_worker::jsonb) elem
+        WHERE elem->>'name' = $1
+          AND ns.assigned_worker IS NOT NULL 
+          AND ns.assigned_worker::text != '[]'
+          AND ns.assigned_worker::text != 'null'
+      )
+      ORDER BY nsc.created_date DESC
+      LIMIT 10
+    `, [worker.user_name]);
+
+    // Get recent appointments for this worker
+    const appointmentsResult = await pool.query(`
+      SELECT 
+        na.id,
+        na.appointment_time,
+        na.appointment_status,
+        na.checkin,
+        na.checkin_address,
+        na.remark,
+        nl.customer_name,
+        nl.customer_phone
+      FROM nano_appointment na
+      JOIN nano_leads nl ON na.lead_id = nl.id
+      WHERE na.assigned_to = $1
+        AND na.assigned_to IS NOT NULL 
+        AND na.assigned_to::text != '[]' 
+        AND na.assigned_to::text != ''
+        AND na.assigned_to::text NOT LIKE '[%]'
+      ORDER BY na.appointment_time DESC
+      LIMIT 10
+    `, [worker_id.toString()]);
+
+    res.status(200).send({
+      success: true,
+      data: {
+        worker: worker,
+        recent_complaints: complaintsResult.rows,
+        recent_appointments: appointmentsResult.rows
+      }
+    });
+  } catch (error) {
+    console.error('Error getting worker performance:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to get worker performance'
+    });
+  }
+});
+
+
+// Use port 3000 for local development, 443 for production
+const PORT = process.env.NODE_ENV === 'production' ? 443 : 3000;
+server.listen(PORT, function () {
+  console.log(`Server started on port ${PORT}`);
+  console.log(`Local development URL: http://localhost:${PORT}`);
 });
 
