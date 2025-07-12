@@ -12919,3 +12919,54 @@ server.listen(PORT, function () {
   }
 });
 
+// Graceful shutdown handling
+const gracefulShutdown = async (signal) => {
+  console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
+  
+  // Close the HTTP server
+  server.close((err) => {
+    if (err) {
+      console.error('Error closing HTTP server:', err);
+    } else {
+      console.log('HTTP server closed successfully');
+    }
+  });
+
+  // Close the database connection pool
+  try {
+    console.log('Closing database connection pool...');
+    await pool.end();
+    console.log('Database connection pool closed successfully');
+  } catch (err) {
+    console.error('Error closing database connection pool:', err);
+  }
+
+  // Close Socket.IO connections
+  try {
+    console.log('Closing Socket.IO connections...');
+    io.close();
+    console.log('Socket.IO connections closed successfully');
+  } catch (err) {
+    console.error('Error closing Socket.IO connections:', err);
+  }
+
+  console.log('Graceful shutdown completed');
+  process.exit(0);
+};
+
+// Handle different shutdown signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  gracefulShutdown('uncaughtException');
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  gracefulShutdown('unhandledRejection');
+});
+
