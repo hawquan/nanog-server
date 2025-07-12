@@ -12906,6 +12906,368 @@ app.post('/getWorkerPerformance', async (req, res) => {
   }
 });
 
+// Subcontractor Statistics API for Waterproofing and Anti-slip Tasks
+app.post('/getSubConTaskStatistics', async (req, res) => {
+  console.log('getSubConTaskStatistics');
+  
+  const { year, task_type, company } = req.body;
+  
+  try {
+    // Build the base query with filters
+    let query = `
+      SELECT 
+        CASE 
+          WHEN LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%' 
+          THEN 'Waterproofing'
+          WHEN LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%' 
+          THEN 'Anti-slip'
+          ELSE 'Other'
+        END AS task_category,
+        SUM(CASE WHEN ns.subcon_state = 'Pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN ns.subcon_state = 'Accepted' THEN 1 ELSE 0 END) AS accepted,
+        SUM(CASE WHEN ns.status = true OR ns.final_approval = true THEN 1 ELSE 0 END) AS completed,
+        COUNT(DISTINCT ns.id) AS total_tasks
+      FROM nano_sales ns
+      LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+      LEFT JOIN nano_packages np ON nsp.package_id = np.id
+      WHERE ns.pending_subcon = $1
+        AND (ns.is_complaint = false OR ns.is_complaint IS NULL)
+        AND (
+          LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%'
+          OR LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%'
+        )
+    `;
+    
+    const params = [company];
+    let paramIndex = 2;
+    
+    // Add year filter if provided
+    if (year) {
+      const startDate = new Date(year, 0, 1).getTime();
+      const endDate = new Date(year, 11, 31, 23, 59, 59, 999).getTime();
+      query += ` AND ns.created_date::BIGINT BETWEEN $${paramIndex} AND $${paramIndex + 1}`;
+      params.push(startDate, endDate);
+      paramIndex += 2;
+    }
+    
+    // Add task type filter if provided
+    if (task_type) {
+      if (task_type === 'WP') {
+        query += ` AND (LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%')`;
+      } else if (task_type === 'AS') {
+        query += ` AND (LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%')`;
+      }
+    }
+    
+    query += `
+      GROUP BY 
+        CASE 
+          WHEN LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%' 
+          THEN 'Waterproofing'
+          WHEN LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%' 
+          THEN 'Anti-slip'
+          ELSE 'Other'
+        END
+      ORDER BY 
+        CASE 
+          WHEN LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%' 
+          THEN 'Waterproofing'
+          WHEN LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%' 
+          THEN 'Anti-slip'
+          ELSE 'Other'
+        END
+    `;
+    
+    const result = await pool.query(query, params);
+    
+    // Format the response to match the UI requirements
+    const formattedData = {
+      statistics: result.rows,
+      summary: {
+        total_pending: result.rows.reduce((sum, row) => sum + parseInt(row.pending), 0),
+        total_accepted: result.rows.reduce((sum, row) => sum + parseInt(row.accepted), 0),
+        total_completed: result.rows.reduce((sum, row) => sum + parseInt(row.completed), 0),
+        total_tasks: result.rows.reduce((sum, row) => sum + parseInt(row.total_tasks), 0)
+      },
+      filters: {
+        year: year || 'All',
+        task_type: task_type || 'All',
+        company: company
+      }
+    };
+    
+    return res.status(200).send({ 
+      data: formattedData, 
+      success: true 
+    });
+    
+  } catch (error) {
+    console.log('Error in getSubConTaskStatistics:', error);
+    return res.status(500).send({ 
+      error: error.message, 
+      success: false 
+    });
+  }
+});
+
+// Get detailed task list for subcontractor statistics
+app.post('/getSubConTaskDetails', async (req, res) => {
+  console.log('getSubConTaskDetails');
+  
+  const { year, task_type, company, status } = req.body;
+  
+  try {
+    let query = `
+      SELECT 
+        ns.id AS sales_id,
+        nl.customer_name,
+        nl.customer_phone,
+        nl.address,
+        nl.customer_state,
+        nl.customer_city,
+        ns.subcon_state,
+        ns.status AS completion_status,
+        ns.final_approval,
+        ns.created_date,
+        ns.task_completed_date,
+        nsp.sap_id,
+        nsp.area,
+        np.service,
+        np.name AS package_name,
+        nsp.total AS task_total,
+        nsp.sub_total AS task_sub_total
+      FROM nano_sales ns
+      LEFT JOIN nano_leads nl ON ns.lead_id = nl.id
+      LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+      LEFT JOIN nano_packages np ON nsp.package_id = np.id
+      WHERE ns.pending_subcon = $1
+        AND (ns.is_complaint = false OR ns.is_complaint IS NULL)
+    `;
+    
+    const params = [company];
+    let paramIndex = 2;
+    
+    // Add year filter if provided
+    if (year) {
+      const startDate = new Date(year, 0, 1).getTime();
+      const endDate = new Date(year, 11, 31, 23, 59, 59, 999).getTime();
+      query += ` AND ns.created_date::BIGINT BETWEEN $${paramIndex} AND $${paramIndex + 1}`;
+      params.push(startDate, endDate);
+      paramIndex += 2;
+    }
+    
+    // Add task type filter if provided
+    if (task_type) {
+      if (task_type === 'WP') {
+        query += ` AND (LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%')`;
+      } else if (task_type === 'AS') {
+        query += ` AND (LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%')`;
+      }
+    }
+    
+    // Add status filter if provided
+    if (status) {
+      if (status === 'pending') {
+        query += ` AND ns.subcon_state = 'Pending'`;
+      } else if (status === 'accepted') {
+        query += ` AND ns.subcon_state = 'Accepted'`;
+      } else if (status === 'completed') {
+        query += ` AND (ns.status = true OR ns.final_approval = true)`;
+      }
+    }
+    
+    query += `
+      AND (
+        LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%'
+        OR LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%'
+      )
+      ORDER BY ns.created_date DESC
+    `;
+    
+    const result = await pool.query(query, params);
+    
+    return res.status(200).send({ 
+      data: result.rows, 
+      success: true 
+    });
+    
+  } catch (error) {
+    console.log('Error in getSubConTaskDetails:', error);
+    return res.status(500).send({ 
+      error: error.message, 
+      success: false 
+    });
+  }
+});
+
+// Get all subcontractor data with year and month filtering (no company filter)
+app.post('/getAllSubConData', async (req, res) => {
+  console.log('getAllSubConData');
+  
+  const { year, month, task_type } = req.body;
+  
+  try {
+    // Build the base query with filters
+    let query = `
+      SELECT 
+        ns.pending_subcon AS company,
+        CASE 
+          WHEN LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%' 
+          THEN 'Waterproofing'
+          WHEN LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%' 
+          THEN 'Anti-slip'
+          ELSE 'Other'
+        END AS task_category,
+        SUM(CASE WHEN ns.subcon_state = 'Pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN ns.subcon_state = 'Accepted' THEN 1 ELSE 0 END) AS accepted,
+        SUM(CASE WHEN ns.status = true OR ns.final_approval = true THEN 1 ELSE 0 END) AS completed,
+        COUNT(DISTINCT ns.id) AS total_tasks,
+        SUM(nsp.total) AS total_revenue,
+        SUM(nsp.sub_total) AS total_sub_total
+      FROM nano_sales ns
+      LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
+      LEFT JOIN nano_packages np ON nsp.package_id = np.id
+      WHERE ns.pending_subcon IS NOT NULL
+        AND ns.pending_subcon != ''
+        AND (ns.is_complaint = false OR ns.is_complaint IS NULL)
+        AND (
+          LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%'
+          OR LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%'
+        )
+    `;
+    
+    const params = [];
+    let paramIndex = 1;
+    
+    // Add year filter if provided
+    if (year) {
+      if (month) {
+        // Filter by specific year and month
+        const startDate = new Date(year, month - 1, 1).getTime();
+        const endDate = new Date(year, month, 0, 23, 59, 59, 999).getTime();
+        query += ` AND ns.created_date::BIGINT BETWEEN $${paramIndex} AND $${paramIndex + 1}`;
+        params.push(startDate, endDate);
+        paramIndex += 2;
+      } else {
+        // Filter by year only
+        const startDate = new Date(year, 0, 1).getTime();
+        const endDate = new Date(year, 11, 31, 23, 59, 59, 999).getTime();
+        query += ` AND ns.created_date::BIGINT BETWEEN $${paramIndex} AND $${paramIndex + 1}`;
+        params.push(startDate, endDate);
+        paramIndex += 2;
+      }
+    }
+    
+    // Add task type filter if provided
+    if (task_type) {
+      if (task_type === 'WP') {
+        query += ` AND (LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%')`;
+      } else if (task_type === 'AS') {
+        query += ` AND (LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%')`;
+      }
+    }
+    
+    query += `
+      GROUP BY 
+        ns.pending_subcon,
+        CASE 
+          WHEN LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%' 
+          THEN 'Waterproofing'
+          WHEN LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%' 
+          THEN 'Anti-slip'
+          ELSE 'Other'
+        END
+      ORDER BY 
+        ns.pending_subcon,
+        CASE 
+          WHEN LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%' 
+          THEN 'Waterproofing'
+          WHEN LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%' 
+          THEN 'Anti-slip'
+          ELSE 'Other'
+        END
+    `;
+    
+    const result = await pool.query(query, params);
+    
+    // Group data by company
+    const groupedData = {};
+    let grandTotal = {
+      pending: 0,
+      accepted: 0,
+      completed: 0,
+      total_tasks: 0,
+      total_revenue: 0,
+      total_sub_total: 0
+    };
+    
+    result.rows.forEach(row => {
+      if (!groupedData[row.company]) {
+        groupedData[row.company] = {
+          company: row.company,
+          statistics: [],
+          summary: {
+            pending: 0,
+            accepted: 0,
+            completed: 0,
+            total_tasks: 0,
+            total_revenue: 0,
+            total_sub_total: 0
+          }
+        };
+      }
+      
+      groupedData[row.company].statistics.push({
+        task_category: row.task_category,
+        pending: parseInt(row.pending),
+        accepted: parseInt(row.accepted),
+        completed: parseInt(row.completed),
+        total_tasks: parseInt(row.total_tasks),
+        total_revenue: parseFloat(row.total_revenue || 0),
+        total_sub_total: parseFloat(row.total_sub_total || 0)
+      });
+      
+      // Update company summary
+      groupedData[row.company].summary.pending += parseInt(row.pending);
+      groupedData[row.company].summary.accepted += parseInt(row.accepted);
+      groupedData[row.company].summary.completed += parseInt(row.completed);
+      groupedData[row.company].summary.total_tasks += parseInt(row.total_tasks);
+      groupedData[row.company].summary.total_revenue += parseFloat(row.total_revenue || 0);
+      groupedData[row.company].summary.total_sub_total += parseFloat(row.total_sub_total || 0);
+      
+      // Update grand total
+      grandTotal.pending += parseInt(row.pending);
+      grandTotal.accepted += parseInt(row.accepted);
+      grandTotal.completed += parseInt(row.completed);
+      grandTotal.total_tasks += parseInt(row.total_tasks);
+      grandTotal.total_revenue += parseFloat(row.total_revenue || 0);
+      grandTotal.total_sub_total += parseFloat(row.total_sub_total || 0);
+    });
+    
+    // Format the response
+    const formattedData = {
+      companies: Object.values(groupedData),
+      grand_total: grandTotal,
+      filters: {
+        year: year || 'All',
+        month: month || 'All',
+        task_type: task_type || 'All'
+      }
+    };
+    
+    return res.status(200).send({ 
+      data: formattedData, 
+      success: true 
+    });
+    
+  } catch (error) {
+    console.log('Error in getAllSubConData:', error);
+    return res.status(500).send({ 
+      error: error.message, 
+      success: false 
+    });
+  }
+});
 
 // Use environment variable for port, with fallbacks
 const PORT = process.env.PORT || (isProduction ? 443 : 3000);
