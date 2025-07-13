@@ -12986,101 +12986,11 @@ app.post('/getSubConTaskStatistics', async (req, res) => {
   }
 });
 
-// Get detailed task list for subcontractor statistics
-app.post('/getSubConTaskDetails', async (req, res) => {
-  console.log('getSubConTaskDetails');
-  
-  const { year, task_type, company, status } = req.body;
-  
-  try {
-    let query = `
-      SELECT 
-        ns.id AS sales_id,
-        nl.customer_name,
-        nl.customer_phone,
-        nl.address,
-        nl.customer_state,
-        nl.customer_city,
-        ns.subcon_state,
-        ns.status AS completion_status,
-        ns.final_approval,
-        ns.created_date,
-        ns.task_completed_date,
-        nsp.sap_id,
-        nsp.area,
-        np.service,
-        np.name AS package_name,
-        nsp.total AS task_total,
-        nsp.sub_total AS task_sub_total
-      FROM nano_sales ns
-      LEFT JOIN nano_leads nl ON ns.lead_id = nl.id
-      LEFT JOIN nano_sales_package nsp ON ns.id = nsp.sales_id
-      LEFT JOIN nano_packages np ON nsp.package_id = np.id
-      WHERE ns.pending_subcon = $1
-        AND (ns.is_complaint = false OR ns.is_complaint IS NULL)
-    `;
-    
-    const params = [company];
-    let paramIndex = 2;
-    
-    // Add year filter if provided
-    if (year) {
-      const startDate = new Date(year, 0, 1).getTime();
-      const endDate = new Date(year, 11, 31, 23, 59, 59, 999).getTime();
-      query += ` AND ns.created_date::BIGINT BETWEEN $${paramIndex} AND $${paramIndex + 1}`;
-      params.push(startDate, endDate);
-      paramIndex += 2;
-    }
-    
-    // Add task type filter if provided
-    if (task_type) {
-      if (task_type === 'WP') {
-        query += ` AND (LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%')`;
-      } else if (task_type === 'AS') {
-        query += ` AND (LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%')`;
-      }
-    }
-    
-    // Add status filter if provided
-    if (status) {
-      if (status === 'pending') {
-        query += ` AND ns.subcon_state = 'Pending'`;
-      } else if (status === 'accepted') {
-        query += ` AND ns.subcon_state = 'Accepted'`;
-      } else if (status === 'completed') {
-        query += ` AND (ns.status = true OR ns.final_approval = true)`;
-      }
-    }
-    
-    query += `
-      AND (
-        LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%'
-        OR LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%'
-      )
-      ORDER BY ns.created_date DESC
-    `;
-    
-    const result = await pool.query(query, params);
-    
-    return res.status(200).send({ 
-      data: result.rows, 
-      success: true 
-    });
-    
-  } catch (error) {
-    console.log('Error in getSubConTaskDetails:', error);
-    return res.status(500).send({ 
-      error: error.message, 
-      success: false 
-    });
-  }
-});
-
 // Get all subcontractor data with year and month filtering (no company filter) 
 app.post('/getAllSubConData', async (req, res) => {
   console.log('getAllSubConData');
   
-  const { year, month, task_type } = req.body;
+  const { year, month, task_type, company } = req.body;
   
   try {
     // Build the base query with filters
@@ -13101,6 +13011,11 @@ app.post('/getAllSubConData', async (req, res) => {
               )
           )
     `;
+    
+    // Add company filter if provided
+    if (company) {
+      query = query.replace('WHERE ns.pending_subcon IS NOT NULL', `WHERE ns.pending_subcon IS NOT NULL AND ns.pending_subcon = '${company}'`);
+    }
     
     const params = [];
     let paramIndex = 1;
@@ -13269,7 +13184,8 @@ app.post('/getAllSubConData', async (req, res) => {
       filters: {
         year: year || 'All',
         month: month || 'All',
-        task_type: task_type || 'All'
+        task_type: task_type || 'All',
+        company: company || 'All'
       }
     };
     
