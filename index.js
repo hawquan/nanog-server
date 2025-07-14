@@ -76,17 +76,17 @@ let server;
 const httpsEnabled = process.env.HTTPS_ENABLED === 'true';
 
 if (httpsEnabled && isProduction) {
-try {
-  server = require('https').createServer({
+  try {
+    server = require('https').createServer({
       key: fs.readFileSync(process.env.SSL_KEY_PATH || 'C:/Certbot/live/api.nanogapp.com/privkey.pem'),
       cert: fs.readFileSync(process.env.SSL_CERT_PATH || 'C:/Certbot/live/api.nanogapp.com/cert.pem'),
-    ca: [
+      ca: [
         fs.readFileSync(process.env.SSL_CHAIN_PATH || 'C:/Certbot/live/api.nanogapp.com/chain.pem'),
         fs.readFileSync(process.env.SSL_FULLCHAIN_PATH || 'C:/Certbot/live/api.nanogapp.com/fullchain.pem'),
-    ]
-  }, app);
-  console.log('HTTPS server created with SSL certificates');
-} catch (error) {
+      ]
+    }, app);
+    console.log('HTTPS server created with SSL certificates');
+  } catch (error) {
     console.log('SSL certificates not found, falling back to HTTP');
     server = require('http').createServer(app);
   }
@@ -300,7 +300,7 @@ app.post('/uploadFilePDF2', async (req, res) => {
   let salesid = req.body.salesid
   let no = req.body.no
 
-  const result = await uploadPDFSE2(base64, leadid, salesid, no)
+  const result = await uploadPDFSE2(base64)
   if (result) {
     res.status(200).send({ imageURL: result ? result.Location : "" })
   } else {
@@ -8482,7 +8482,7 @@ app.post('/getPendingSalesForSubCon2', (req, res) => {
   }).catch((error) => {
     console.log(error);
     return res.status(800).send({ error: error.message, success: false });
-  })
+  });
 });
 
 app.post('/getAcceptedSalesForSubCon', (req, res) => {
@@ -10007,6 +10007,20 @@ app.post('/uploadServiceForm', (req, res) => {
   let now = new Date().getTime()
   let now2 = new Date().getTime()
 
+  // if (quoteid) {
+
+  // pool.query(`With updateform as (UPDATE subcon_service_form SET(created_date, serviceform) = ($1, $2) WHERE id = $3 RETURNING id)
+  //   SELECT * FROM updateform`, [now, req.body.latest_serviceform, quoteid]).then((result) => {
+  //   return res.status(200).send({ success: true })
+
+  // }).catch((error) => {
+  //   console.log(error)
+  //   return res.status(800).send({ success: false })
+  // })
+
+  // }
+  // else {
+
   pool.query(`With updateform as (INSERT INTO subcon_service_form (created_date, serviceform, lead_id, appointment_id, sales_id) VALUES ($1, $2, $3, $4, $5) RETURNING id)
    
       SELECT * FROM updateform`, [now, req.body.latest_serviceform, req.body.lead_id, req.body.appointment_id, req.body.sales_id]).then((result) => {
@@ -10016,6 +10030,8 @@ app.post('/uploadServiceForm', (req, res) => {
     console.log(error)
     return res.status(800).send({ success: false })
   })
+
+  // }
 
 })
 
@@ -10035,10 +10051,13 @@ app.post('/uploadWarrantyForm', (req, res) => {
     return res.status(800).send({ success: false })
   })
 
+  // }
+
 })
 
 app.post('/getServiceFormnumber', (req, res) => {
   console.log('getServiceFormnumber')
+  // let now = new Date().getTime()
 
   pool.query(`SELECT COUNT(*) as sofkey, (SELECT id from subcon_service_form WHERE sales_id = $1) FROM subcon_service_form`, [req.body.sales_id]).then((result) => {
     return res.status(200).send({ data: result.rows, success: true })
@@ -10050,6 +10069,7 @@ app.post('/getServiceFormnumber', (req, res) => {
 
 app.post('/getServiceFormByLead', (req, res) => {
   console.log('getServiceFormnumber')
+  // let now = new Date().getTime()
 
   pool.query(`SELECT * from subcon_service_form WHERE lead_id = $1 ORDER BY id DESC`, [req.body.lead_id]).then((result) => {
     return res.status(200).send({ data: result.rows, success: true })
@@ -10061,6 +10081,7 @@ app.post('/getServiceFormByLead', (req, res) => {
 
 app.post('/getWarrantyFormByLead', (req, res) => {
   console.log('getWarrantyFormByLead')
+  // let now = new Date().getTime()
 
   pool.query(`SELECT * from nano_warranty_form WHERE lead_id = $1 ORDER BY id DESC`, [req.body.lead_id]).then((result) => {
     return res.status(200).send({ data: result.rows, success: true })
@@ -10122,6 +10143,7 @@ app.post('/getMonthTaskForAll', async (req, res) => {
 
 app.post('/getTaskListForAll', async (req, res) => {
   console.log('getTaskListForAll');
+  // LbdDaz3w3yPFVjTEQVr6PbGP3PC3
 
   pool.query(`WITH selectdata AS (SELECT nl.customer_name, nl.customer_phone, nl.address, ns.id AS sales_id, ns.assigned_worker AS worker, ns.status, ns.final_approval,
   (SELECT JSON_AGG(JSON_BUILD_OBJECT('sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark,
@@ -10151,6 +10173,7 @@ app.post('/getTaskListForAll', async (req, res) => {
 //remark, date, task list
 app.post('/getLDetailForSubConApp2', async (req, res) => {
   console.log('getLDetailForSubConApp2');
+  // LbdDaz3w3yPFVjTEQVr6PbGP3PC3
 
   pool.query(`SELECT nl.customer_name, nl.customer_phone, nl.address, ns.id AS sales_id, ns.assigned_worker AS worker, ns.status,
   (SELECT JSON_AGG(JSON_BUILD_OBJECT('sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark,
@@ -10181,6 +10204,7 @@ app.post('/getLDetailForSubConApp2', async (req, res) => {
 
 app.post('/getCompletedLDetailForSubConApp', async (req, res) => {
   console.log('getCompletedLDetailForSubConApp');
+  // LbdDaz3w3yPFVjTEQVr6PbGP3PC3
 
   pool.query(`SELECT nl.customer_name, nl.customer_phone, nl.address, ns.id AS sales_id, ns.assigned_worker AS worker, ns.status as status,
   (SELECT JSON_AGG(JSON_BUILD_OBJECT('sap_id', sap_id, 'place', nsp.area, 'service', np.service, 'remark', nsp.remark,
@@ -13105,7 +13129,7 @@ server.listen(PORT, function () {
   console.log(`Server started on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV}`);
   if (isDevelopment) {
-  console.log(`Local development URL: http://localhost:${PORT}`);
+    console.log(`Local development URL: http://localhost:${PORT}`);
   } else {
     console.log(`Production server running on port ${PORT}`);
   }
