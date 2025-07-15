@@ -12921,24 +12921,17 @@ app.post('/getAllSubConData', async (req, res) => {
         WHERE ns.pending_subcon IS NOT NULL
           AND ns.pending_subcon != ''
           AND (ns.is_complaint = false OR ns.is_complaint IS NULL)
-          AND EXISTS (
-            SELECT 1 FROM nano_sales_package nsp
-            LEFT JOIN nano_packages np ON nsp.package_id = np.id
-            WHERE nsp.sales_id = ns.id
-              AND (
-                LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%'
-                OR LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%'
-              )
-          )
     `;
-    
-    // Add company filter if provided
-    if (company) {
-      query = query.replace('WHERE ns.pending_subcon IS NOT NULL', `WHERE ns.pending_subcon IS NOT NULL AND ns.pending_subcon = '${company}'`);
-    }
     
     const params = [];
     let paramIndex = 1;
+    
+    // Add company filter if provided
+    if (company) {
+      query += ` AND ns.pending_subcon = $${paramIndex}`;
+      params.push(company);
+      paramIndex++;
+    }
     
     // Add year filter if provided
     if (year) {
@@ -12959,11 +12952,43 @@ app.post('/getAllSubConData', async (req, res) => {
       }
     }
     
+    // Add task type filter to the CTE
+    if (task_type) {
+      if (task_type === 'WP') {
+        query += ` AND EXISTS (
+          SELECT 1 FROM nano_sales_package nsp
+          LEFT JOIN nano_packages np ON nsp.package_id = np.id
+          WHERE nsp.sales_id = ns.id
+            AND (LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%')
+        )`;
+      } else if (task_type === 'AS') {
+        query += ` AND EXISTS (
+          SELECT 1 FROM nano_sales_package nsp
+          LEFT JOIN nano_packages np ON nsp.package_id = np.id
+          WHERE nsp.sales_id = ns.id
+            AND (LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%')
+        )`;
+      }
+    } else {
+      // If no task type filter, include all relevant task types
+      query += ` AND EXISTS (
+        SELECT 1 FROM nano_sales_package nsp
+        LEFT JOIN nano_packages np ON nsp.package_id = np.id
+        WHERE nsp.sales_id = ns.id
+          AND (
+            LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%'
+            OR LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%'
+          )
+      )`;
+    }
+    
     query += `
       )
       SELECT 
         fs.pending_subcon AS company,
         CASE 
+          WHEN $${paramIndex} = 'WP' THEN 'Waterproofing'
+          WHEN $${paramIndex} = 'AS' THEN 'Anti-slip'
           WHEN EXISTS (
             SELECT 1 FROM nano_sales_package nsp
             LEFT JOIN nano_packages np ON nsp.package_id = np.id
@@ -12985,30 +13010,10 @@ app.post('/getAllSubConData', async (req, res) => {
         SUM((SELECT COALESCE(SUM(nsp.total),0) FROM nano_sales_package nsp WHERE nsp.sales_id = fs.id)) AS total_revenue,
         SUM((SELECT COALESCE(SUM(nsp.sub_total),0) FROM nano_sales_package nsp WHERE nsp.sales_id = fs.id)) AS total_sub_total
       FROM filtered_sales fs
-    `;
-    
-    // Add task type filter if provided
-    if (task_type) {
-      if (task_type === 'WP') {
-        query += ` WHERE EXISTS (
-          SELECT 1 FROM nano_sales_package nsp
-          LEFT JOIN nano_packages np ON nsp.package_id = np.id
-          WHERE nsp.sales_id = fs.id
-            AND (LOWER(np.service) LIKE '%waterproof%' OR LOWER(np.service) LIKE '%wp%' OR LOWER(np.name) LIKE '%waterproof%')
-        )`;
-      } else if (task_type === 'AS') {
-        query += ` WHERE EXISTS (
-          SELECT 1 FROM nano_sales_package nsp
-          LEFT JOIN nano_packages np ON nsp.package_id = np.id
-          WHERE nsp.sales_id = fs.id
-            AND (LOWER(np.service) LIKE '%anti%slip%' OR LOWER(np.service) LIKE '%as%' OR LOWER(np.name) LIKE '%anti%slip%')
-        )`;
-      }
-    }
-    
-    query += `
       GROUP BY fs.pending_subcon, 
         CASE 
+          WHEN $${paramIndex} = 'WP' THEN 'Waterproofing'
+          WHEN $${paramIndex} = 'AS' THEN 'Anti-slip'
           WHEN EXISTS (
             SELECT 1 FROM nano_sales_package nsp
             LEFT JOIN nano_packages np ON nsp.package_id = np.id
@@ -13025,6 +13030,8 @@ app.post('/getAllSubConData', async (req, res) => {
         END
       ORDER BY fs.pending_subcon, 
         CASE 
+          WHEN $${paramIndex} = 'WP' THEN 'Waterproofing'
+          WHEN $${paramIndex} = 'AS' THEN 'Anti-slip'
           WHEN EXISTS (
             SELECT 1 FROM nano_sales_package nsp
             LEFT JOIN nano_packages np ON nsp.package_id = np.id
@@ -13040,6 +13047,9 @@ app.post('/getAllSubConData', async (req, res) => {
           ELSE 'Other'
         END
     `;
+    
+    // Add task_type parameter
+    params.push(task_type || null);
     
     const result = await pool.query(query, params);
     
