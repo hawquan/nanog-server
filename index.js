@@ -3847,7 +3847,13 @@ app.post('/getLeadListForApp', async (req, res) => {
           (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, 
           nls.subcon_state, nls.finance_check, nls.finance_remark, 
           (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
-          nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
+          nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid,
+          nl.refund_status,
+          (SELECT CASE 
+            WHEN nl.refund_status = 'none' THEN true
+            WHEN nl.refund_status = 'rejected' THEN true
+            ELSE false
+          END) as can_request_refund
           FROM nano_leads nl LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id LEFT JOIN nano_user u1 ON nl.created_by = u1.uid LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
           LEFT JOIN nano_label nla ON nl.label_m = nla.id LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id LEFT JOIN 
           nano_sales nls ON nat.id = nls.appointment_id WHERE exists (select * from json_array_elements_text(nat.assigned_to4) as ppl where ppl = $1 )
@@ -3886,7 +3892,13 @@ app.post('/getLeadListForAppByname', async (req, res) => {
           (SELECT SUM(total) FROM nano_payment_log WHERE sales_id = nls.id AND ac_approval = 'Approved' AND sc_approval = 'Approved')) AS approved_paid, 
           nls.subcon_state, nls.finance_check, nls.finance_remark, 
           (SELECT category FROM nano_channel WHERE name = nl.channel_id) AS category,
-          nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid
+          nl.lattitude, nl.longtitude, u1.user_name AS created_by, u3.user_name AS sales_coord, u3.uid AS sales_coord_uid,
+          nl.refund_status,
+          (SELECT CASE 
+            WHEN nl.refund_status = 'none' THEN true
+            WHEN nl.refund_status = 'rejected' THEN true
+            ELSE false
+          END) as can_request_refund
           FROM nano_leads nl LEFT JOIN nano_appointment nat ON nl.id = nat.lead_id LEFT JOIN nano_user u1 ON nl.created_by = u1.uid LEFT JOIN nano_user u3 ON nl.sales_coordinator = u3.uid
           LEFT JOIN nano_label nla ON nl.label_m = nla.id LEFT JOIN nano_label nla2 ON nl.label_s = nla2.id LEFT JOIN 
           nano_sales nls ON nat.id = nls.appointment_id WHERE exists (select * from json_array_elements_text(nat.assigned_to4) as ppl where ppl = $1 )
@@ -13129,6 +13141,1050 @@ app.post('/getAllSubConData', async (req, res) => {
     return res.status(500).send({ 
       error: error.message, 
       success: false 
+    });
+  }
+});
+
+// ========================================
+// REFUND REQUEST APIs
+// ========================================
+
+// 1. Create Refund Request (Consultant)
+app.post('/createRefundRequest', async (req, res) => {
+  console.log('createRefundRequest');
+  
+  try {
+    const {
+      lead_id,
+      sale_id,
+      refund_reason,
+      user_uid, // consultant's Firebase UID
+      user_role // should be 'Sales Executive'
+    } = req.body;
+
+    // Validate required fields
+    if (!lead_id || !user_uid) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Missing required fields: lead_id, user_uid' 
+      });
+    }
+
+    // Validate user exists and has the claimed role
+    const userValidation = await pool.query(
+      `SELECT uid, user_role FROM nano_user WHERE uid = $1`,
+      [user_uid]
+    );
+
+    if (userValidation.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    const actualUserRole = userValidation.rows[0].user_role;
+    if (actualUserRole !== user_role) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'User role mismatch. Actual role: ' + actualUserRole 
+      });
+    }
+
+    // Validate user role (only Sales Executive can create refund requests)
+    if (actualUserRole !== 'Sales Executive') {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'Only Sales Executive can create refund requests' 
+      });
+    }
+
+    // Check if user is a leader
+    const leaderCheck = await pool.query(
+      `SELECT is_leader FROM nano_user WHERE uid = $1`,
+      [user_uid]
+    );
+
+    if (leaderCheck.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    const isLeader = leaderCheck.rows[0].is_leader;
+    const initialStatus = isLeader ? 'pending_signature' : 'leader_pending';
+    const currentApproverRole = isLeader ? 'customer' : 'leader';
+
+    // Check if refund request already exists for this lead (not just sale)
+    const existingRequest = await pool.query(
+      `SELECT id, status FROM nano_refund_requests WHERE lead_id = $1 AND status NOT IN ('rejected', 'completed')`,
+      [lead_id]
+    );
+
+    if (existingRequest.rows.length > 0) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Refund request already exists for this lead and is currently being processed' 
+      });
+    }
+
+    // Check if a refund was already completed for this lead
+    const completedRefund = await pool.query(
+      `SELECT id FROM nano_refund_requests WHERE lead_id = $1 AND status = 'completed'`,
+      [lead_id]
+    );
+
+    if (completedRefund.rows.length > 0) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Refund has already been completed for this lead. No new refund requests allowed.' 
+      });
+    }
+
+    // Get customer information and sale details from database
+    const customerInfo = await pool.query(
+      `SELECT 
+        l.customer_name,
+        l.customer_phone,
+        l.customer_email,
+        s.total as sale_total,
+        s.id as sale_id
+       FROM nano_leads l
+       LEFT JOIN nano_appointment na ON na.lead_id = l.id
+       LEFT JOIN nano_sales s ON s.appointment_id = na.id
+       WHERE l.id = $1`,
+      [lead_id]
+    );
+
+    if (customerInfo.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'Lead not found' 
+      });
+    }
+
+    // If sale_id is provided, validate it matches the lead
+    if (sale_id) {
+      const saleExists = customerInfo.rows.find(row => row.sale_id == sale_id);
+      if (!saleExists) {
+        return res.status(400).send({ 
+          success: false, 
+          message: 'Sale ID does not match the provided Lead ID' 
+        });
+      }
+    }
+
+    // Get the first sale for this lead (or use provided sale_id)
+    const selectedSale = sale_id 
+      ? customerInfo.rows.find(row => row.sale_id == sale_id)
+      : customerInfo.rows[0]; // Use first sale if no sale_id provided
+    
+    if (!selectedSale) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'No sale found for this lead' 
+      });
+    }
+
+    const refund_amount = selectedSale.sale_total || 0;
+    const actual_sale_id = selectedSale.sale_id;
+
+    // Create refund request with data from database
+    const result = await pool.query(
+      `INSERT INTO nano_refund_requests (
+        lead_id, sale_id, consultant_id, customer_name, customer_phone, 
+        customer_email, refund_amount, refund_reason, status, current_approver_role,
+        approval_history
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+      [
+        lead_id, actual_sale_id, user_uid, selectedSale.customer_name, selectedSale.customer_phone,
+        selectedSale.customer_email, refund_amount, refund_reason || 'Customer requested refund', 
+        initialStatus, currentApproverRole,
+        JSON.stringify([{
+          action: 'created',
+          user_id: user_uid,
+          user_role: user_role,
+          is_leader: isLeader,
+          timestamp: new Date().toISOString(),
+          notes: isLeader ? 'Refund request created by leader consultant' : 'Refund request created by consultant, pending leader approval'
+        }])
+      ]
+    );
+
+    // Update lead status to indicate refund request is ongoing
+    await pool.query(
+      `UPDATE nano_leads SET refund_status = 'pending' WHERE id = $1`,
+      [lead_id]
+    );
+
+    return res.status(200).send({ 
+      success: true, 
+      refund_request_id: result.rows[0].id,
+      message: isLeader ? 'Refund request created successfully. Customer signature required.' : 'Refund request created successfully. Pending leader approval.',
+      status: initialStatus,
+      requires_leader_approval: !isLeader,
+      data: {
+        lead_id: lead_id,
+        sale_id: actual_sale_id,
+        customer_name: selectedSale.customer_name,
+        customer_phone: selectedSale.customer_phone,
+        customer_email: selectedSale.customer_email,
+        refund_amount: refund_amount,
+        refund_reason: refund_reason || 'Customer requested refund'
+      }
+    });
+
+  } catch (error) {
+    console.log('Error in createRefundRequest:', error);
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// 2. Upload Customer Signature
+app.post('/uploadRefundSignature', async (req, res) => {
+  console.log('uploadRefundSignature');
+  
+  try {
+    const {
+      refund_request_id,
+      signature_image, // base64 image data
+      customer_name,
+      customer_phone
+    } = req.body;
+
+    // Validate required fields
+    if (!refund_request_id || !signature_image) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Missing required fields' 
+      });
+    }
+
+    // Check if refund request exists and is in correct status
+    const refundRequest = await pool.query(
+      `SELECT * FROM nano_refund_requests WHERE id = $1`,
+      [refund_request_id]
+    );
+
+    if (refundRequest.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'Refund request not found' 
+      });
+    }
+
+    if (refundRequest.rows[0].status !== 'pending_signature') {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Refund request is not in signature pending status' 
+      });
+    }
+
+    // Upload signature image to S3
+    const signatureUrl = await uploadsignimage(signature_image, 'refund-signatures', refund_request_id);
+
+    if (!signatureUrl) {
+      return res.status(500).send({ 
+        success: false, 
+        message: 'Failed to upload signature' 
+      });
+    }
+
+    // Update refund request with signature and move to next status
+    let approvalHistory;
+    try {
+      approvalHistory = JSON.parse(refundRequest.rows[0].approval_history || '[]');
+    } catch (error) {
+      // If approval_history is already an object or invalid JSON, start with empty array
+      approvalHistory = [];
+    }
+    
+    approvalHistory.push({
+      action: 'signature_uploaded',
+      customer_name: customer_name,
+      customer_phone: customer_phone,
+      timestamp: new Date().toISOString(),
+      notes: 'Customer signature uploaded'
+    });
+
+    await pool.query(
+      `UPDATE nano_refund_requests SET 
+        customer_signature_url = $1, 
+        customer_signature_date = CURRENT_TIMESTAMP,
+        status = $2, 
+        current_approver_role = $3,
+        approval_history = $4,
+        updated_date = CURRENT_TIMESTAMP
+       WHERE id = $5`,
+      [signatureUrl.Location, 'sales_coordinator_pending', 'sales_coordinator', JSON.stringify(approvalHistory), refund_request_id]
+    );
+
+    return res.status(200).send({ 
+      success: true, 
+      signature_url: signatureUrl.Location,
+      message: 'Signature uploaded successfully' 
+    });
+
+  } catch (error) {
+    console.log('Error in uploadRefundSignature:', error);
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// 3. Approve/Reject Refund Request
+app.post('/approveRefundRequest', async (req, res) => {
+  console.log('approveRefundRequest');
+  
+  try {
+    const {
+      refund_request_id,
+      action, // 'approve' or 'reject'
+      user_uid,
+      user_role,
+      reason, // required for rejection
+      receipt_image // optional, required for financial approval (base64 image)
+    } = req.body;
+
+    // Validate required fields
+    if (!refund_request_id || !action || !user_uid || !user_role) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Missing required fields' 
+      });
+    }
+
+    if (action === 'reject' && !reason) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Rejection reason is required' 
+      });
+    }
+
+    // Validate user exists and has the claimed role
+    let userValidation;
+    let actualUserRole;
+
+    if (user_role === 'Project Admin') {
+      // Project Admins are in sub_company table
+      userValidation = await pool.query(
+        `SELECT uid, type as user_role FROM sub_company WHERE uid = $1 AND type = 'Project Admin'`,
+        [user_uid]
+      );
+    } else {
+      // Other users are in nano_user table
+      userValidation = await pool.query(
+        `SELECT uid, user_role FROM nano_user WHERE uid = $1`,
+        [user_uid]
+      );
+    }
+
+    if (userValidation.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    actualUserRole = userValidation.rows[0].user_role;
+    if (actualUserRole !== user_role) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'User role mismatch. Actual role: ' + actualUserRole 
+      });
+    }
+
+    // Get current refund request
+    const refundRequest = await pool.query(
+      `SELECT * FROM nano_refund_requests WHERE id = $1`,
+      [refund_request_id]
+    );
+
+    if (refundRequest.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'Refund request not found' 
+      });
+    }
+
+    const currentRequest = refundRequest.rows[0];
+    let approvalHistory;
+    try {
+      approvalHistory = JSON.parse(currentRequest.approval_history || '[]');
+    } catch (error) {
+      // If approval_history is already an object or invalid JSON, start with empty array
+      approvalHistory = [];
+    }
+
+    if (action === 'reject') {
+      // Handle rejection
+      await pool.query(
+        `UPDATE nano_refund_requests SET 
+          status = 'rejected',
+          rejected_by = $1,
+          rejected_by_user_id = $2,
+          rejection_reason = $3,
+          rejection_date = CURRENT_TIMESTAMP,
+          approval_history = $4,
+          updated_date = CURRENT_TIMESTAMP
+         WHERE id = $5`,
+        [user_role, user_uid, reason, JSON.stringify([...approvalHistory, {
+          action: 'rejected',
+          user_id: user_uid,
+          user_role: user_role,
+          reason: reason,
+          timestamp: new Date().toISOString()
+        }]), refund_request_id]
+      );
+
+      // Update lead status to indicate refund was rejected (allows new requests)
+      await pool.query(
+        `UPDATE nano_leads SET refund_status = 'rejected' WHERE id = $1`,
+        [currentRequest.lead_id]
+      );
+
+      return res.status(200).send({ 
+        success: true, 
+        message: 'Refund request rejected' 
+      });
+    }
+
+    // Handle approval based on current status and user role
+    let newStatus = '';
+    let updateFields = {};
+    let approvalAction = '';
+
+    switch (currentRequest.status) {
+      case 'leader_pending':
+        if (user_role === 'Sales Executive') {
+          // Check if the approving user is a leader
+          const leaderValidation = await pool.query(
+            `SELECT is_leader FROM nano_user WHERE uid = $1`,
+            [user_uid]
+          );
+          
+          if (leaderValidation.rows.length === 0 || !leaderValidation.rows[0].is_leader) {
+            return res.status(403).send({ 
+              success: false, 
+              message: 'Only Sales Executive leaders can approve at this stage' 
+            });
+          }
+          
+          newStatus = 'pending_signature';
+          updateFields = {
+            leader_approved: user_uid,
+            leader_approved_date: 'CURRENT_TIMESTAMP',
+            current_approver_role: 'customer'
+          };
+          approvalAction = 'leader_approved';
+        } else {
+          return res.status(403).send({ 
+            success: false, 
+            message: 'Only Sales Executive leaders can approve at this stage' 
+          });
+        }
+        break;
+
+      case 'sales_coordinator_pending':
+        if (user_role === 'Sales Coordinator') {
+          newStatus = 'project_admin_pending';
+          updateFields = {
+            sales_coordinator_approved: user_uid,
+            sales_coordinator_approved_date: 'CURRENT_TIMESTAMP',
+            current_approver_role: 'project_admin'
+          };
+          approvalAction = 'sales_coordinator_approved';
+        } else {
+          return res.status(403).send({ 
+            success: false, 
+            message: 'Only Sales Coordinator can approve at this stage' 
+          });
+        }
+        break;
+
+      case 'project_admin_pending':
+        // Check if user exists in sub_company table as Project Admin
+        const projectAdminCheck = await pool.query(
+          `SELECT uid FROM sub_company WHERE uid = $1 AND type = 'Project Admin'`,
+          [user_uid]
+        );
+        
+        if (projectAdminCheck.rows.length === 0) {
+          return res.status(403).send({ 
+            success: false, 
+            message: 'Only Project Admin can approve at this stage' 
+          });
+        }
+        
+        newStatus = 'nanog_admin_pending';
+        updateFields = {
+          project_admin_approved: user_uid,
+          project_admin_approved_date: 'CURRENT_TIMESTAMP',
+          current_approver_role: 'nanog_admin'
+        };
+        approvalAction = 'project_admin_approved';
+        break;
+
+      case 'nanog_admin_pending':
+        if (user_role === 'Super Admin' || user_role === 'System Admin') {
+          newStatus = 'financial_pending';
+          updateFields = {
+            nanog_admin_approved: user_uid,
+            nanog_admin_approved_date: 'CURRENT_TIMESTAMP',
+            current_approver_role: 'financial'
+          };
+          approvalAction = 'nanog_admin_approved';
+        } else {
+          return res.status(403).send({ 
+            success: false, 
+            message: 'Only Nano G Super Admin/System Admin can approve at this stage' 
+          });
+        }
+        break;
+
+      case 'financial_pending':
+        if (user_role === 'Finance') {
+          if (!receipt_image) {
+            return res.status(400).send({ 
+              success: false, 
+              message: 'Receipt image is required for financial approval' 
+            });
+          }
+          
+          // Upload receipt image to S3
+          const receiptUrl = await uploadFile(receipt_image, 'refund-receipts', refund_request_id);
+          
+          if (!receiptUrl) {
+            return res.status(500).send({ 
+              success: false, 
+              message: 'Failed to upload receipt image' 
+            });
+          }
+          
+          newStatus = 'accounts_pending';
+          updateFields = {
+            financial_approved: user_uid,
+            financial_approved_date: 'CURRENT_TIMESTAMP',
+            receipt_url: receiptUrl.Location,
+            current_approver_role: 'accounts'
+          };
+          approvalAction = 'financial_approved';
+        } else {
+          return res.status(403).send({ 
+            success: false, 
+            message: 'Only Finance can approve at this stage' 
+          });
+        }
+        break;
+
+      case 'accounts_pending':
+        if (user_role === 'Account') {
+          newStatus = 'completed';
+          updateFields = {
+            accounts_approved: user_uid,
+            accounts_approved_date: 'CURRENT_TIMESTAMP',
+            current_approver_role: null
+          };
+          approvalAction = 'accounts_approved';
+          
+          // Update lead status to indicate refund is completed
+          await pool.query(
+            `UPDATE nano_leads SET refund_status = 'completed' WHERE id = $1`,
+            [currentRequest.lead_id]
+          );
+        } else {
+          return res.status(403).send({ 
+            success: false, 
+            message: 'Only Accounts can approve at this stage' 
+          });
+        }
+        break;
+
+      default:
+        return res.status(400).send({ 
+          success: false, 
+          message: 'Invalid status for approval' 
+        });
+    }
+
+    // Build update query
+    let updateQuery = `UPDATE nano_refund_requests SET status = $1, updated_date = CURRENT_TIMESTAMP`;
+    let queryParams = [newStatus];
+    let paramIndex = 2;
+
+    if (updateFields.leader_approved) {
+      updateQuery += `, leader_approved = $${paramIndex}, leader_approved_date = CURRENT_TIMESTAMP`;
+      queryParams.push(updateFields.leader_approved);
+      paramIndex++;
+    }
+    if (updateFields.sales_coordinator_approved) {
+      updateQuery += `, sales_coordinator_approved = $${paramIndex}, sales_coordinator_approved_date = CURRENT_TIMESTAMP`;
+      queryParams.push(updateFields.sales_coordinator_approved);
+      paramIndex++;
+    }
+    if (updateFields.project_admin_approved) {
+      updateQuery += `, project_admin_approved = $${paramIndex}, project_admin_approved_date = CURRENT_TIMESTAMP`;
+      queryParams.push(updateFields.project_admin_approved);
+      paramIndex++;
+    }
+    if (updateFields.nanog_admin_approved) {
+      updateQuery += `, nanog_admin_approved = $${paramIndex}, nanog_admin_approved_date = CURRENT_TIMESTAMP`;
+      queryParams.push(updateFields.nanog_admin_approved);
+      paramIndex++;
+    }
+    if (updateFields.financial_approved) {
+      updateQuery += `, financial_approved = $${paramIndex}, financial_approved_date = CURRENT_TIMESTAMP`;
+      queryParams.push(updateFields.financial_approved);
+      paramIndex++;
+    }
+    if (updateFields.accounts_approved) {
+      updateQuery += `, accounts_approved = $${paramIndex}, accounts_approved_date = CURRENT_TIMESTAMP`;
+      queryParams.push(updateFields.accounts_approved);
+      paramIndex++;
+    }
+    if (updateFields.receipt_url) {
+      updateQuery += `, receipt_url = $${paramIndex}`;
+      queryParams.push(updateFields.receipt_url);
+      paramIndex++;
+    }
+    if (updateFields.current_approver_role !== undefined) {
+      updateQuery += `, current_approver_role = $${paramIndex}`;
+      queryParams.push(updateFields.current_approver_role);
+      paramIndex++;
+    }
+
+    // Add approval history
+    approvalHistory.push({
+      action: approvalAction,
+      user_id: user_uid,
+      user_role: user_role,
+      timestamp: new Date().toISOString(),
+      notes: action === 'approve' ? 'Request approved' : 'Request rejected'
+    });
+
+    updateQuery += `, approval_history = $${paramIndex} WHERE id = $${paramIndex + 1}`;
+    queryParams.push(JSON.stringify(approvalHistory), refund_request_id);
+
+    await pool.query(updateQuery, queryParams);
+
+    return res.status(200).send({ 
+      success: true, 
+      message: `Refund request ${action}d successfully`,
+      new_status: newStatus
+    });
+
+  } catch (error) {
+    console.log('Error in approveRefundRequest:', error);
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// 4. Get Refund Requests (Admin Listing)
+app.post('/getRefundRequests', async (req, res) => {
+  console.log('getRefundRequests');
+  
+  try {
+    const {
+      user_role,
+      user_uid,
+      status, // optional filter
+      page = 1,
+      limit = 20
+    } = req.body;
+
+    // Validate required fields
+    if (!user_role) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'User role is required' 
+      });
+    }
+
+    // Build query based on user role
+    let query = `
+      SELECT 
+        r.*,
+        l.customer_name as lead_customer_name,
+        l.customer_phone as lead_customer_phone,
+        s.total as sale_total,
+        u1.user_name as consultant_name,
+        u2.user_name as leader_name,
+        u3.user_name as sales_coordinator_name,
+        u4.name_display as project_admin_name,
+        u5.user_name as nanog_admin_name,
+        u6.user_name as financial_name,
+        u7.user_name as accounts_name
+      FROM nano_refund_requests r
+      LEFT JOIN nano_leads l ON r.lead_id = l.id
+      LEFT JOIN nano_sales s ON r.sale_id = s.id
+      LEFT JOIN nano_user u1 ON r.consultant_id = u1.uid
+      LEFT JOIN nano_user u2 ON r.leader_approved = u2.uid
+      LEFT JOIN nano_user u3 ON r.sales_coordinator_approved = u3.uid
+      LEFT JOIN sub_company u4 ON r.project_admin_approved = u4.uid
+      LEFT JOIN nano_user u5 ON r.nanog_admin_approved = u5.uid
+      LEFT JOIN nano_user u6 ON r.financial_approved = u6.uid
+      LEFT JOIN nano_user u7 ON r.accounts_approved = u7.uid
+      WHERE 1=1
+    `;
+    let queryParams = [];
+    let paramIndex = 1;
+
+    // Filter by status if provided
+    if (status) {
+      query += ` AND r.status = $${paramIndex}`;
+      queryParams.push(status);
+      paramIndex++;
+    }
+
+    // Filter based on user role
+    if (user_role === 'Sales Executive') {
+      // Sales Executive can only see their own requests
+      query += ` AND r.consultant_id = $${paramIndex}`;
+      queryParams.push(user_uid);
+      paramIndex++;
+    } else if (user_role === 'Sales Executive') {
+      // Check if user is a leader
+      const leaderCheck = await pool.query(
+        `SELECT is_leader FROM nano_user WHERE uid = $1`,
+        [user_uid]
+      );
+      
+      if (leaderCheck.rows.length > 0 && leaderCheck.rows[0].is_leader) {
+        // Leaders can see requests pending their approval + their own requests
+        query += ` AND (r.status = 'leader_pending' OR r.consultant_id = $${paramIndex})`;
+        queryParams.push(user_uid);
+        paramIndex++;
+      } else {
+        // Non-leaders can only see their own requests
+        query += ` AND r.consultant_id = $${paramIndex}`;
+        queryParams.push(user_uid);
+        paramIndex++;
+      }
+    } else if (user_role === 'Sales Coordinator') {
+      // Sales Coordinator can see requests pending their approval
+      query += ` AND (r.status = 'sales_coordinator_pending' OR r.consultant_id = $${paramIndex})`;
+      queryParams.push(user_uid);
+      paramIndex++;
+    } else if (user_role === 'Project Admin') {
+      // Project Admin can see requests pending their approval
+      query += ` AND (r.status = 'project_admin_pending')`;
+    } else if (user_role === 'Finance') {
+      // Finance can see requests pending their approval
+      query += ` AND (r.status = 'financial_pending' OR r.status = 'completed')`;
+    } else if (user_role === 'Account') {
+      // Account can see requests pending their approval
+      query += ` AND (r.status = 'accounts_pending' OR r.status = 'completed')`;
+    }
+    // Super Admin and System Admin can see all requests (no additional filter)
+
+    // Add pagination
+    const offset = (page - 1) * limit;
+    query += ` ORDER BY r.created_date DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    queryParams.push(limit, offset);
+
+    const result = await pool.query(query, queryParams);
+
+    // Get total count for pagination
+    let countQuery = `
+      SELECT COUNT(*) as total
+      FROM nano_refund_requests r
+      WHERE 1=1
+    `;
+    let countParams = [];
+    let countParamIndex = 1;
+
+    if (status) {
+      countQuery += ` AND r.status = $${countParamIndex}`;
+      countParams.push(status);
+      countParamIndex++;
+    }
+
+    if (user_role === 'Sales Executive') {
+      // Check if user is a leader (simplified for count query)
+      const leaderCheck = await pool.query(
+        `SELECT is_leader FROM nano_user WHERE uid = $1`,
+        [user_uid]
+      );
+      
+      if (leaderCheck.rows.length > 0 && leaderCheck.rows[0].is_leader) {
+        // Leaders can see requests pending their approval + their own requests
+        countQuery += ` AND (r.status = 'leader_pending' OR r.consultant_id = $${countParamIndex})`;
+        countParams.push(user_uid);
+        countParamIndex++;
+      } else {
+        // Non-leaders can only see their own requests
+        countQuery += ` AND r.consultant_id = $${countParamIndex}`;
+        countParams.push(user_uid);
+        countParamIndex++;
+      }
+    } else if (user_role === 'Sales Coordinator') {
+      countQuery += ` AND (r.status = 'sales_coordinator_pending' OR r.consultant_id = $${countParamIndex})`;
+      countParams.push(user_uid);
+      countParamIndex++;
+    } else if (user_role === 'Project Admin') {
+      countQuery += ` AND (r.status = 'project_admin_pending')`;
+    } else if (user_role === 'Finance') {
+      countQuery += ` AND (r.status = 'financial_pending' OR r.status = 'completed')`;
+    } else if (user_role === 'Account') {
+      countQuery += ` AND (r.status = 'accounts_pending' OR r.status = 'completed')`;
+    }
+
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].total);
+
+    return res.status(200).send({ 
+      success: true, 
+      data: result.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: total,
+        total_pages: Math.ceil(total / limit)
+      }
+    });
+
+  } catch (error) {
+    console.log('Error in getRefundRequests:', error);
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// 5. Get Refund Request Details
+app.post('/getRefundRequestDetails', async (req, res) => {
+  console.log('getRefundRequestDetails');
+  
+  try {
+    const { refund_request_id, user_role, user_uid } = req.body;
+
+    // Validate required fields
+    if (!refund_request_id) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Refund request ID is required' 
+      });
+    }
+
+    // Get refund request details
+    const result = await pool.query(
+      `SELECT 
+        r.*,
+        l.customer_name as lead_customer_name,
+        l.customer_phone as lead_customer_phone,
+        l.customer_email as lead_customer_email,
+        s.total as sale_total,
+        s.subcon_state as sale_subcon_state,
+        u1.user_name as consultant_name,
+        u2.user_name as leader_name,
+        u3.user_name as sales_coordinator_name,
+        u4.name_display as project_admin_name,
+        u5.user_name as nanog_admin_name,
+        u6.user_name as financial_name,
+        u7.user_name as accounts_name,
+        u8.user_name as rejected_by_name
+      FROM nano_refund_requests r
+      LEFT JOIN nano_leads l ON r.lead_id = l.id
+      LEFT JOIN nano_sales s ON r.sale_id = s.id
+      LEFT JOIN nano_user u1 ON r.consultant_id = u1.uid
+      LEFT JOIN nano_user u2 ON r.leader_approved = u2.uid
+      LEFT JOIN nano_user u3 ON r.sales_coordinator_approved = u3.uid
+      LEFT JOIN sub_company u4 ON r.project_admin_approved = u4.uid
+      LEFT JOIN nano_user u5 ON r.nanog_admin_approved = u5.uid
+      LEFT JOIN nano_user u6 ON r.financial_approved = u6.uid
+      LEFT JOIN nano_user u7 ON r.accounts_approved = u7.uid
+      LEFT JOIN nano_user u8 ON r.rejected_by_user_id = u8.uid
+      WHERE r.id = $1`,
+      [refund_request_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'Refund request not found' 
+      });
+    }
+
+    const refundRequest = result.rows[0];
+
+    // Check if user has permission to view this request
+    if (user_role === 'Sales Executive' && refundRequest.consultant_id !== user_uid) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'You can only view your own refund requests' 
+      });
+    }
+
+    // Process approval history to create a detailed activity timeline
+    let activityTimeline = [];
+    try {
+      const approvalHistory = JSON.parse(refundRequest.approval_history || '[]');
+      
+      // Add creation activity
+      activityTimeline.push({
+        step: 1,
+        action: 'created',
+        action_display: 'Refund Request Created',
+        user_id: refundRequest.consultant_id,
+        user_name: refundRequest.consultant_name,
+        user_role: 'Sales Executive',
+        timestamp: refundRequest.created_date,
+        status: refundRequest.status,
+        notes: 'Refund request initiated by consultant',
+        completed: true
+      });
+
+      // Process each approval/rejection action
+      approvalHistory.forEach((action, index) => {
+        let actionDisplay = '';
+        let step = 0;
+        
+        switch(action.action) {
+          case 'leader_approved':
+            actionDisplay = 'Leader Approval';
+            step = 2;
+            break;
+          case 'sales_coordinator_approved':
+            actionDisplay = 'Sales Coordinator Approval';
+            step = 3;
+            break;
+          case 'project_admin_approved':
+            actionDisplay = 'Project Admin Approval';
+            step = 4;
+            break;
+          case 'nanog_admin_approved':
+            actionDisplay = 'Nano G Admin Approval';
+            step = 5;
+            break;
+          case 'financial_approved':
+            actionDisplay = 'Financial Approval';
+            step = 6;
+            break;
+          case 'accounts_approved':
+            actionDisplay = 'Accounts Approval';
+            step = 7;
+            break;
+          case 'rejected':
+            actionDisplay = 'Request Rejected';
+            step = -1; // Rejection stops the flow
+            break;
+          default:
+            actionDisplay = action.action.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+            step = index + 2;
+        }
+
+        activityTimeline.push({
+          step: step,
+          action: action.action,
+          action_display: actionDisplay,
+          user_id: action.user_id,
+          user_name: action.user_role === 'Project Admin' ? refundRequest.project_admin_name : 
+                    action.user_role === 'Sales Executive' ? refundRequest.leader_name :
+                    action.user_role === 'Sales Coordinator' ? refundRequest.sales_coordinator_name :
+                    action.user_role === 'Super Admin' || action.user_role === 'System Admin' ? refundRequest.nanog_admin_name :
+                    action.user_role === 'Finance' ? refundRequest.financial_name :
+                    action.user_role === 'Account' ? refundRequest.accounts_name :
+                    action.user_role === 'Sales Executive' ? refundRequest.rejected_by_name : 'Unknown',
+          user_role: action.user_role,
+          timestamp: action.timestamp,
+          status: refundRequest.status,
+          notes: action.notes || action.reason || 'Action completed',
+          completed: true,
+          rejection_reason: action.reason || null
+        });
+      });
+
+      // Sort timeline by timestamp
+      activityTimeline.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+    } catch (error) {
+      console.log('Error processing approval history:', error);
+      activityTimeline = [];
+    }
+
+    // Add the processed timeline to the response
+    refundRequest.activity_timeline = activityTimeline;
+
+    return res.status(200).send({ 
+      success: true, 
+      data: refundRequest
+    });
+
+  } catch (error) {
+    console.log('Error in getRefundRequestDetails:', error);
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// 6. Get Refund Status for Lead
+app.post('/getRefundStatus', async (req, res) => {
+  console.log('getRefundStatus');
+  
+  try {
+    const { lead_id } = req.body;
+
+    // Validate required fields
+    if (!lead_id) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Lead ID is required' 
+      });
+    }
+
+    // Get refund status from nano_leads table
+    const leadStatus = await pool.query(
+      `SELECT refund_status FROM nano_leads WHERE id = $1`,
+      [lead_id]
+    );
+
+    if (leadStatus.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'Lead not found' 
+      });
+    }
+
+    // Get detailed refund request info if exists
+    const refundRequest = await pool.query(
+      `SELECT id, status, created_date, refund_amount, refund_reason 
+       FROM nano_refund_requests 
+       WHERE lead_id = $1 
+       ORDER BY created_date DESC 
+       LIMIT 1`,
+      [lead_id]
+    );
+
+    const refundStatus = leadStatus.rows[0].refund_status || 'none';
+    const canRequestRefund = refundStatus === 'none' || refundStatus === 'rejected';
+
+    return res.status(200).send({ 
+      success: true, 
+      data: {
+        lead_id: lead_id,
+        refund_status: refundStatus,
+        can_request_refund: canRequestRefund,
+        latest_refund_request: refundRequest.rows[0] || null
+      }
+    });
+
+  } catch (error) {
+    console.log('Error in getRefundStatus:', error);
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
     });
   }
 });
