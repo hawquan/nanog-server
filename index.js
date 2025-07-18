@@ -6757,6 +6757,12 @@ app.post('/getAppointmentDetails', (req, res) => {
       s2.id AS warranty_sales_id, ns.sub_total, nw.*,
        ns.discount_applied, ns.discount_image,  ns.scaff_height,  ns.scaff_fee,  ns.skylift_height,  ns.skylift_fee, ns.transportation_fee, ns.quotation_request, ns.warranty, ns.quote_no, ns.price_breakdown,
        ns.working_duration, npo.name AS promo_name, npo.percentage AS promo_percent, npo.id AS promo_id,
+       l.refund_status,
+       (SELECT CASE 
+         WHEN l.refund_status = 'none' THEN true
+         WHEN l.refund_status = 'rejected' THEN true
+         ELSE false
+       END) as can_request_refund,
 
        (
         SELECT json_build_object(
