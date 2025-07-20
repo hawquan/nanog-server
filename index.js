@@ -13255,7 +13255,8 @@ app.post('/createRefundRequest', async (req, res) => {
         l.customer_phone,
         l.customer_email,
         s.total as sale_total,
-        s.id as sale_id
+        s.id as sale_id,
+        COALESCE((SELECT SUM(total) FROM nano_payment_log WHERE sales_id = s.id AND ac_approval = 'Approved' AND sc_approval = 'Approved'), 0) as total_paid
        FROM nano_leads l
        LEFT JOIN nano_appointment na ON na.lead_id = l.id
        LEFT JOIN nano_sales s ON s.appointment_id = na.id
@@ -13293,8 +13294,23 @@ app.post('/createRefundRequest', async (req, res) => {
       });
     }
 
-    const refund_amount = selectedSale.sale_total || 0;
+    // Use total_paid instead of sale_total to avoid negative refund amounts
+    // If total_paid is 0 or null, fall back to sale_total (but ensure it's positive)
+    let refund_amount = selectedSale.total_paid || 0;
+    
+    // If total_paid is 0, try to use sale_total but ensure it's positive
+    if (refund_amount === 0) {
+      refund_amount = Math.max(0, selectedSale.sale_total || 0);
+    }
+    
     const actual_sale_id = selectedSale.sale_id;
+
+    // Log refund amount calculation for debugging
+    console.log(`Refund amount calculation for lead ${lead_id}:`, {
+      sale_total: selectedSale.sale_total,
+      total_paid: selectedSale.total_paid,
+      final_refund_amount: refund_amount
+    });
 
     // Create refund request with data from database
     const result = await pool.query(
@@ -14194,6 +14210,8 @@ app.post('/getRefundStatus', async (req, res) => {
     });
   }
 });
+
+
 
 // Use environment variable for port, with fallbacks
 const PORT = process.env.PORT || (isProduction ? 443 : 3000);
