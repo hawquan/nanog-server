@@ -12924,11 +12924,11 @@ app.post('/getWorkerPerformance', async (req, res) => {
   }
 });
 
-// Get all subcontractor data with year and month filtering (no company filter) 
+// Get all subcontractor data with flexible date filtering (year/month or startdate/enddate) 
 app.post('/getAllSubConData', async (req, res) => {
   console.log('getAllSubConData');
   
-  const { year, month, task_type, company } = req.body;
+  const { year, month, task_type, company, startdate, enddate } = req.body;
   
   try {
     // Build the base query with filters
@@ -12951,8 +12951,28 @@ app.post('/getAllSubConData', async (req, res) => {
       paramIndex++;
     }
     
-    // Add year filter if provided
-    if (year) {
+    // Add date filtering - prioritize startdate/enddate over year/month
+    if (startdate && enddate) {
+      // Use provided start and end dates
+      const startDateMs = new Date(startdate).getTime();
+      const endDateMs = new Date(enddate).setHours(23, 59, 59, 999); // Set to end of day
+      query += ` AND ns.created_date::BIGINT BETWEEN $${paramIndex} AND $${paramIndex + 1}`;
+      params.push(startDateMs, endDateMs);
+      paramIndex += 2;
+    } else if (startdate) {
+      // Use only start date (from start date to now)
+      const startDateMs = new Date(startdate).getTime();
+      query += ` AND ns.created_date::BIGINT >= $${paramIndex}`;
+      params.push(startDateMs);
+      paramIndex++;
+    } else if (enddate) {
+      // Use only end date (from beginning to end date)
+      const endDateMs = new Date(enddate).setHours(23, 59, 59, 999);
+      query += ` AND ns.created_date::BIGINT <= $${paramIndex}`;
+      params.push(endDateMs);
+      paramIndex++;
+    } else if (year) {
+      // Fallback to year/month filtering if no startdate/enddate provided
       if (month) {
         // Filter by specific year and month
         const startDate = new Date(year, month - 1, 1).getTime();
