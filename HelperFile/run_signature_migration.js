@@ -15,7 +15,7 @@ async function runMigration() {
     console.log('Starting signature approval migration...');
     
     // Read migration file
-    const migrationSQL = fs.readFileSync('signature_approval_migration.sql', 'utf8');
+    const migrationSQL = fs.readFileSync('add_title_to_refund_requests.sql', 'utf8');
     
     // Run migration
     const result = await pool.query(migrationSQL);

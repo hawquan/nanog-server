@@ -13233,6 +13233,341 @@ app.post('/getAllSubConData', async (req, res) => {
 });
 
 // ========================================
+// REFUND TITLES APIs
+// ========================================
+
+// 1. Create Refund Title
+app.post('/createRefundTitle', async (req, res) => {
+  console.log('createRefundTitle');
+  
+  try {
+    const {
+      title,
+      description,
+      user_uid, // creator's Firebase UID
+      user_role // should be admin level role
+    } = req.body;
+
+    // Validate required fields
+    if (!title || !user_uid || !user_role) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Missing required fields: title, user_uid, user_role' 
+      });
+    }
+
+    // Validate user exists and has admin role
+    const userValidation = await pool.query(
+      'SELECT uid, user_role FROM nano_user WHERE uid = $1',
+      [user_uid]
+    );
+
+    if (userValidation.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    const actualUserRole = userValidation.rows[0].user_role;
+    if (actualUserRole !== user_role) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'User role mismatch. Actual role: ' + actualUserRole 
+      });
+    }
+
+    // Only allow admin roles to create titles
+    if (!['Super Admin', 'System Admin'].includes(actualUserRole)) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'Only Super Admin and System Admin can create refund titles' 
+      });
+    }
+
+    // Create new refund title
+    const result = await pool.query(
+      'INSERT INTO nano_refund_titles (title, description, created_by, updated_by) ' +
+      'VALUES ($1, $2, $3, $3) ' +
+      'RETURNING *',
+      [title, description, user_uid]
+    );
+
+    return res.status(200).send({ 
+      success: true, 
+      data: result.rows[0]
+    });
+
+  } catch (error) {
+    console.log('Error in createRefundTitle:', error);
+    
+    // Handle duplicate title error
+    if (error.code === '23505') { // unique violation
+      return res.status(400).send({ 
+        success: false, 
+        message: 'A refund title with this name already exists' 
+      });
+    }
+    
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// 2. Get All Refund Titles
+app.post('/getRefundTitles', async (req, res) => {
+  console.log('getRefundTitles');
+  
+  try {
+    const { include_inactive = false } = req.body;
+
+    let query = 'SELECT rt.*, u1.user_name as created_by_name, u2.user_name as updated_by_name ' +
+      'FROM nano_refund_titles rt ' +
+      'LEFT JOIN nano_user u1 ON rt.created_by = u1.uid ' +
+      'LEFT JOIN nano_user u2 ON rt.updated_by = u2.uid';
+
+    // Only show active titles unless specifically requested
+    if (!include_inactive) {
+      query += ' WHERE rt.is_active = true';
+    }
+
+    query += ' ORDER BY rt.title';
+
+    const result = await pool.query(query);
+
+    return res.status(200).send({ 
+      success: true, 
+      data: result.rows
+    });
+
+  } catch (error) {
+    console.log('Error in getRefundTitles:', error);
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// 3. Update Refund Title
+app.post('/updateRefundTitle', async (req, res) => {
+  console.log('updateRefundTitle');
+  
+  try {
+    const {
+      id,
+      title,
+      description,
+      is_active,
+      user_uid, // updater's Firebase UID
+      user_role // should be admin level role
+    } = req.body;
+
+    // Validate required fields
+    if (!id || !user_uid || !user_role) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Missing required fields: id, user_uid, user_role' 
+      });
+    }
+
+    // Validate user exists and has admin role
+    const userValidation = await pool.query(
+      `SELECT uid, user_role FROM nano_user WHERE uid = $1`,
+      [user_uid]
+    );
+
+    if (userValidation.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    const actualUserRole = userValidation.rows[0].user_role;
+    if (actualUserRole !== user_role) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'User role mismatch. Actual role: ' + actualUserRole 
+      });
+    }
+
+    // Only allow admin roles to update titles
+    if (!['Super Admin', 'System Admin'].includes(actualUserRole)) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'Only Super Admin and System Admin can update refund titles' 
+      });
+    }
+
+    // Build update query dynamically based on provided fields
+    let updateFields = [];
+    let queryParams = [id, user_uid];
+    let paramCount = 3;
+
+    if (title !== undefined) {
+      updateFields.push('title = $' + paramCount);
+      queryParams.push(title);
+      paramCount++;
+    }
+
+    if (description !== undefined) {
+      updateFields.push('description = $' + paramCount);
+      queryParams.push(description);
+      paramCount++;
+    }
+
+    if (is_active !== undefined) {
+      updateFields.push('is_active = $' + paramCount);
+      queryParams.push(is_active);
+      paramCount++;
+    }
+
+    // Always update the updated_by field
+    updateFields.push('updated_by = $2');
+
+    const query = 'UPDATE nano_refund_titles SET ' + updateFields.join(', ') + ' WHERE id = $1 RETURNING *';
+
+    const result = await pool.query(query, queryParams);
+
+    if (result.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'Refund title not found' 
+      });
+    }
+
+    return res.status(200).send({ 
+      success: true, 
+      data: result.rows[0]
+    });
+
+  } catch (error) {
+    console.log('Error in updateRefundTitle:', error);
+    
+    // Handle duplicate title error
+    if (error.code === '23505') { // unique violation
+      return res.status(400).send({ 
+        success: false, 
+        message: 'A refund title with this name already exists' 
+      });
+    }
+    
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// 4. Delete Refund Title
+app.post('/deleteRefundTitle', async (req, res) => {
+  console.log('deleteRefundTitle');
+  
+  try {
+    const {
+      id,
+      user_uid, // deleter's Firebase UID
+      user_role // should be admin level role
+    } = req.body;
+
+    // Validate required fields
+    if (!id || !user_uid || !user_role) {
+      return res.status(400).send({ 
+        success: false, 
+        message: 'Missing required fields: id, user_uid, user_role' 
+      });
+    }
+
+    // Validate user exists and has admin role
+    const userValidation = await pool.query(
+      `SELECT uid, user_role FROM nano_user WHERE uid = $1`,
+      [user_uid]
+    );
+
+    if (userValidation.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+
+    const actualUserRole = userValidation.rows[0].user_role;
+    if (actualUserRole !== user_role) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'User role mismatch. Actual role: ' + actualUserRole 
+      });
+    }
+
+    // Only allow admin roles to delete titles
+    if (!['Super Admin', 'System Admin'].includes(actualUserRole)) {
+      return res.status(403).send({ 
+        success: false, 
+        message: 'Only Super Admin and System Admin can delete refund titles' 
+      });
+    }
+
+    // Check if title is in use
+    const usageCheck = await pool.query(
+      'SELECT COUNT(*) FROM nano_refund_requests WHERE title = (SELECT title FROM nano_refund_titles WHERE id = $1)',
+      [id]
+    );
+
+    if (parseInt(usageCheck.rows[0].count) > 0) {
+      // If title is in use, just mark it as inactive instead of deleting
+      const result = await pool.query(
+        'UPDATE nano_refund_titles ' +
+        'SET is_active = false, updated_by = $2 ' +
+        'WHERE id = $1 ' +
+        'RETURNING *',
+        [id, user_uid]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).send({ 
+          success: false, 
+          message: 'Refund title not found' 
+        });
+      }
+
+      return res.status(200).send({ 
+        success: true, 
+        data: result.rows[0],
+        message: 'Title is in use by existing refund requests. Marked as inactive instead of deleting.'
+      });
+    }
+
+    // If title is not in use, we can safely delete it
+    const result = await pool.query(
+      'DELETE FROM nano_refund_titles WHERE id = $1 RETURNING *',
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send({ 
+        success: false, 
+        message: 'Refund title not found' 
+      });
+    }
+
+    return res.status(200).send({ 
+      success: true, 
+      data: result.rows[0]
+    });
+
+  } catch (error) {
+    console.log('Error in deleteRefundTitle:', error);
+    return res.status(500).send({ 
+      success: false, 
+      message: error.message 
+    });
+  }
+});
+
+// ========================================
 // REFUND REQUEST APIs
 // ========================================
 
@@ -13244,18 +13579,21 @@ app.post('/createRefundRequest', async (req, res) => {
     const {
       lead_id,
       sale_id,
+      title,
       refund_reason,
       user_uid, // consultant's Firebase UID
       user_role // should be 'Sales Executive'
     } = req.body;
 
     // Validate required fields
-    if (!lead_id || !user_uid) {
+    if (!lead_id || !user_uid || !title) {
       return res.status(400).send({ 
         success: false, 
-        message: 'Missing required fields: lead_id, user_uid' 
+        message: 'Missing required fields: lead_id, user_uid, title' 
       });
     }
+
+    // Title is now free text and doesn't need to match predefined list
 
     // Validate user exists and has the claimed role
     const userValidation = await pool.query(
@@ -13398,8 +13736,8 @@ app.post('/createRefundRequest', async (req, res) => {
       `INSERT INTO nano_refund_requests (
         lead_id, sale_id, consultant_id, customer_name, customer_phone, 
         customer_email, refund_amount, refund_reason, status, current_approver_role,
-        approval_history
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+        approval_history, title
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
       [
         lead_id, actual_sale_id, user_uid, selectedSale.customer_name, selectedSale.customer_phone,
         selectedSale.customer_email, refund_amount, refund_reason || 'Customer requested refund', 
@@ -13411,7 +13749,8 @@ app.post('/createRefundRequest', async (req, res) => {
           is_leader: isLeader,
           timestamp: new Date().toISOString(),
           notes: isLeader ? 'Refund request created by leader consultant' : 'Refund request created by consultant, pending leader approval'
-        }])
+        }]),
+        title
       ]
     );
 
@@ -13434,7 +13773,8 @@ app.post('/createRefundRequest', async (req, res) => {
         customer_phone: selectedSale.customer_phone,
         customer_email: selectedSale.customer_email,
         refund_amount: refund_amount,
-        refund_reason: refund_reason || 'Customer requested refund'
+        refund_reason: refund_reason || 'Customer requested refund',
+        title: title
       }
     });
 
@@ -14002,7 +14342,41 @@ app.post('/getRefundRequests', async (req, res) => {
     // Build query based on user role
     let query = `
       SELECT 
-        r.*,
+        r.id,
+        r.lead_id,
+        r.sale_id,
+        r.consultant_id,
+        r.customer_name,
+        r.customer_phone,
+        r.customer_email,
+        r.refund_amount,
+        r.refund_reason,
+        r.title,
+        r.customer_signature_url,
+        r.status,
+        r.current_approver_role,
+        r.leader_approved,
+        r.leader_approved_date,
+        r.sales_coordinator_approved,
+        r.sales_coordinator_approved_date,
+        r.project_admin_approved,
+        r.project_admin_approved_date,
+        r.nanog_admin_approved,
+        r.nanog_admin_approved_date,
+        r.financial_approved,
+        r.financial_approved_date,
+        r.accounts_approved,
+        r.accounts_approved_date,
+        r.rejected_by,
+        r.rejected_by_user_id,
+        r.rejection_reason,
+        r.rejection_date,
+        r.receipt_url,
+        r.created_date,
+        r.updated_date,
+        r.customer_signature_date,
+        r.notes,
+        r.approval_history,
         l.customer_name as lead_customer_name,
         l.customer_phone as lead_customer_phone,
         s.total as sale_total,
