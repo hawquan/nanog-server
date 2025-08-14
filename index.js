@@ -12681,28 +12681,66 @@ app.post('/getGalleryByUid', (req, res) => {
 app.post('/getWorkersByRanking', async (req, res) => {
   console.log('getWorkersByRanking');
   
+  const { startdate, enddate } = req.body;
+  
+  let startTimestamp = null;
+  let endTimestamp = null;
+
+  // Only process dates if both are provided
+  if (startdate && enddate) {
+    // Function to validate date string format (YYYY-MM-DD)
+    const isValidDateFormat = (dateStr) => {
+      const regex = /^\d{4}-\d{2}-\d{2}$/;
+      return regex.test(dateStr);
+    };
+
+    if (!isValidDateFormat(startdate) || !isValidDateFormat(enddate)) {
+      return res.status(400).send({
+        success: false,
+        message: 'Invalid date format. Please use YYYY-MM-DD format'
+      });
+    }
+
+    // Convert start date to start of day timestamp
+    const startTime = new Date(startdate);
+    startTime.setHours(0, 0, 0, 0);
+    startTimestamp = startTime.getTime();
+
+    // Convert end date to end of day timestamp
+    const endTime = new Date(enddate);
+    endTime.setHours(23, 59, 59, 999);
+    endTimestamp = endTime.getTime();
+
+    if (isNaN(startTimestamp) || isNaN(endTimestamp)) {
+      return res.status(400).send({
+        success: false,
+        message: 'Invalid date values'
+      });
+    }
+  }
+  
   try {
-    // Get all subcon workers with their complaint counts
     const result = await pool.query(`
-      SELECT 
-        su.user_id,
-        su.user_name,
-        su.user_role,
-        su.user_phone_no,
-        su.user_email,
-        su.profile_image,
-        su.employee_id,
-        su.login_id,
-        su.company_id,
-        COALESCE(complaint_stats.complaint_count, 0) as complaint_count,
-        COALESCE(appointment_stats.appointment_count, 0) as appointment_count,
-        CASE 
-          WHEN COALESCE(complaint_stats.complaint_count, 0) = 0 THEN 'Best Worker'
-          WHEN COALESCE(complaint_stats.complaint_count, 0) <= 2 THEN 'Good Worker'
-          WHEN COALESCE(complaint_stats.complaint_count, 0) <= 5 THEN 'Average Worker'
-          ELSE 'Poor Worker'
-        END as ranking_category
-      FROM sub_user su
+      WITH active_workers AS (
+        SELECT 
+          su.user_id,
+          su.user_name,
+          su.user_role,
+          su.user_phone_no,
+          su.user_email,
+          su.profile_image,
+          su.employee_id,
+          su.login_id,
+          su.company_id,
+          COALESCE(complaint_stats.complaint_count, 0) as complaint_count,
+          COALESCE(appointment_stats.appointment_count, 0) as appointment_count,
+          CASE 
+            WHEN COALESCE(complaint_stats.complaint_count, 0) = 0 THEN 'Best Worker'
+            WHEN COALESCE(complaint_stats.complaint_count, 0) <= 2 THEN 'Good Worker'
+            WHEN COALESCE(complaint_stats.complaint_count, 0) <= 5 THEN 'Average Worker'
+            ELSE 'Poor Worker'
+          END as ranking_category
+        FROM sub_user su
       LEFT JOIN (
         SELECT 
           worker_name,
@@ -12716,6 +12754,7 @@ app.post('/getWorkersByRanking', async (req, res) => {
           WHERE ns.assigned_worker IS NOT NULL 
             AND ns.assigned_worker::text != '[]'
             AND ns.assigned_worker::text != 'null'
+            ${startTimestamp && endTimestamp ? 'AND nsc.created_date::BIGINT BETWEEN $1 AND $2' : ''}
         ) worker_complaints
         WHERE worker_name IS NOT NULL AND worker_name != ''
         GROUP BY worker_name
@@ -12729,28 +12768,50 @@ app.post('/getWorkersByRanking', async (req, res) => {
           AND assigned_to::text != '[]' 
           AND assigned_to::text != ''
           AND assigned_to::text NOT LIKE '[%]'
+          ${startTimestamp && endTimestamp ? 'AND appointment_time::BIGINT BETWEEN $1 AND $2' : ''}
         GROUP BY assigned_to
       ) appointment_stats ON su.user_id::text = appointment_stats.worker_id
       WHERE su.active = true
-      ORDER BY complaint_count ASC, appointment_count DESC
-    `);
+          AND su.employee_id LIKE 'SB%'
+      ),
+      worst_workers AS (
+        SELECT *
+        FROM active_workers
+        WHERE complaint_count > 0
+        ORDER BY complaint_count DESC, appointment_count ASC
+        LIMIT 10
+      ),
+      best_workers AS (
+        SELECT *
+        FROM active_workers
+        WHERE complaint_count = 0
+        ORDER BY appointment_count DESC
+      )
+      SELECT 
+        (SELECT json_agg(w.*) FROM best_workers w) as best_workers,
+        (SELECT json_agg(w.*) FROM worst_workers w) as worst_workers,
+        (SELECT json_agg(w.*) FROM active_workers w) as all_workers,
+        (SELECT COUNT(*) FROM active_workers) as total_workers,
+        (SELECT COUNT(*) FROM active_workers WHERE complaint_count = 0) as best_workers_count,
+        (SELECT COUNT(*) FROM active_workers WHERE complaint_count > 0) as workers_with_complaints,
+        (SELECT COALESCE(SUM(complaint_count), 0) FROM active_workers) as total_complaints
+    `, startTimestamp && endTimestamp ? [startTimestamp, endTimestamp] : []);
 
-    // Separate workers into categories
-    const bestWorkers = result.rows.filter(worker => worker.complaint_count === 0);
-    const worstWorkers = result.rows.filter(worker => worker.complaint_count > 0)
-                                   .sort((a, b) => b.complaint_count - a.complaint_count);
 
+
+    const data = result.rows[0];
+    
     res.status(200).send({
       success: true,
       data: {
-        best_workers: bestWorkers.slice(0, 10), // Top 10 best workers
-        worst_workers: worstWorkers.slice(0, 10), // Top 10 worst workers
-        all_workers: result.rows,
+        best_workers: data.best_workers || [],
+        worst_workers: data.worst_workers || [],
+        all_workers: data.all_workers || [],
         summary: {
-          total_workers: result.rows.length,
-          best_workers_count: bestWorkers.length,
-          workers_with_complaints: worstWorkers.length,
-          total_complaints: result.rows.reduce((sum, worker) => sum + worker.complaint_count, 0)
+          total_workers: data.total_workers || 0,
+          best_workers_count: data.best_workers_count || 0,
+          workers_with_complaints: data.workers_with_complaints || 0,
+          total_complaints: data.total_complaints || 0
         }
       }
     });
