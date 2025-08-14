@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS nano_refund_requests (
     customer_signature_url VARCHAR(500),
     
     -- Status tracking
-    status VARCHAR(50) DEFAULT 'pending_signature', -- leader_pending, pending_signature, sales_coordinator_pending, project_admin_pending, nanog_admin_pending, financial_pending, accounts_pending, completed, rejected
+    status VARCHAR(50) DEFAULT 'pending_signature', -- leader_pending, pending_signature, leader_signature_approval_pending, sales_coordinator_pending, project_admin_pending, nanog_admin_pending, financial_pending, accounts_pending, completed, rejected
     current_approver_role VARCHAR(50), -- leader, customer, sales_coordinator, project_admin, nanog_admin, financial, accounts
     
     -- Approval tracking

@@ -13439,9 +13439,22 @@ app.post('/uploadRefundSignature', async (req, res) => {
     // Update refund request with signature and move to next status
     let approvalHistory;
     try {
-      approvalHistory = JSON.parse(refundRequest.rows[0].approval_history || '[]');
+      const currentHistory = refundRequest.rows[0].approval_history || [];
+      // console.log('Current approval_history before signature upload:', currentHistory);
+      
+      // Check if it's already an object/array (from PostgreSQL JSON field) or a string that needs parsing
+      if (typeof currentHistory === 'string') {
+        approvalHistory = JSON.parse(currentHistory);
+      } else if (Array.isArray(currentHistory)) {
+        approvalHistory = currentHistory; // Already an array
+      } else {
+        approvalHistory = []; // Fallback to empty array
+      }
+      
+      console.log('Processed approval_history length:', approvalHistory.length);
     } catch (error) {
-      // If approval_history is already an object or invalid JSON, start with empty array
+      // If approval_history is invalid, start with empty array
+      // console.log('Error processing approval_history, starting with empty array:', error);
       approvalHistory = [];
     }
     
@@ -13462,13 +13475,13 @@ app.post('/uploadRefundSignature', async (req, res) => {
         approval_history = $4,
         updated_date = CURRENT_TIMESTAMP
        WHERE id = $5`,
-      [signatureUrl.Location, 'sales_coordinator_pending', 'sales_coordinator', JSON.stringify(approvalHistory), refund_request_id]
+      [signatureUrl.Location, 'leader_signature_approval_pending', 'leader', JSON.stringify(approvalHistory), refund_request_id]
     );
 
     return res.status(200).send({ 
       success: true, 
       signature_url: signatureUrl.Location,
-      message: 'Signature uploaded successfully' 
+      message: 'Signature uploaded successfully. Pending Sales Executive leader approval.' 
     });
 
   } catch (error) {
@@ -13558,42 +13571,78 @@ app.post('/approveRefundRequest', async (req, res) => {
     const currentRequest = refundRequest.rows[0];
     let approvalHistory;
     try {
-      approvalHistory = JSON.parse(currentRequest.approval_history || '[]');
+      const currentHistory = currentRequest.approval_history || [];
+      // console.log('Current approval_history before approval action:', currentHistory);
+      
+      // Check if it's already an object/array (from PostgreSQL JSON field) or a string that needs parsing
+      if (typeof currentHistory === 'string') {
+        approvalHistory = JSON.parse(currentHistory);
+      } else if (Array.isArray(currentHistory)) {
+        approvalHistory = currentHistory; // Already an array
+      } else {
+        approvalHistory = []; // Fallback to empty array
+      }
+      
+      // console.log('Processed approval_history length:', approvalHistory.length);
     } catch (error) {
-      // If approval_history is already an object or invalid JSON, start with empty array
+      // If approval_history is invalid, start with empty array
+      // console.log('Error processing approval_history in approval, starting with empty array:', error);
       approvalHistory = [];
     }
 
     if (action === 'reject') {
-      // Handle rejection
+      // Handle rejection based on current status
+      let rejectionStatus = 'rejected';
+      let leadStatus = 'rejected';
+      let rejectionNotes = 'Request rejected';
+      
+      // Special handling for signature rejection - go back to pending_signature
+      if (currentRequest.status === 'leader_signature_approval_pending') {
+        rejectionStatus = 'pending_signature';
+        leadStatus = 'pending'; // Keep as pending since we're going back to signature
+        rejectionNotes = 'Signature rejected, customer needs to submit new signature';
+      }
+      
       await pool.query(
         `UPDATE nano_refund_requests SET 
-          status = 'rejected',
-          rejected_by = $1,
-          rejected_by_user_id = $2,
-          rejection_reason = $3,
+          status = $1,
+          rejected_by = $2,
+          rejected_by_user_id = $3,
+          rejection_reason = $4,
           rejection_date = CURRENT_TIMESTAMP,
-          approval_history = $4,
+          current_approver_role = $5,
+          approval_history = $6,
           updated_date = CURRENT_TIMESTAMP
-         WHERE id = $5`,
-        [user_role, user_uid, reason, JSON.stringify([...approvalHistory, {
-          action: 'rejected',
-          user_id: user_uid,
-          user_role: user_role,
-          reason: reason,
-          timestamp: new Date().toISOString()
-        }]), refund_request_id]
+         WHERE id = $7`,
+        [
+          rejectionStatus, 
+          user_role, 
+          user_uid, 
+          reason, 
+          rejectionStatus === 'pending_signature' ? 'customer' : null,
+          JSON.stringify([...approvalHistory, {
+            action: 'rejected',
+            user_id: user_uid,
+            user_role: user_role,
+            reason: reason,
+            notes: rejectionNotes,
+            timestamp: new Date().toISOString()
+          }]), 
+          refund_request_id
+        ]
       );
 
-      // Update lead status to indicate refund was rejected (allows new requests)
+      // Update lead status
       await pool.query(
-        `UPDATE nano_leads SET refund_status = 'rejected' WHERE id = $1`,
-        [currentRequest.lead_id]
+        `UPDATE nano_leads SET refund_status = $1 WHERE id = $2`,
+        [leadStatus, currentRequest.lead_id]
       );
 
       return res.status(200).send({ 
         success: true, 
-        message: 'Refund request rejected' 
+        message: rejectionStatus === 'pending_signature' ? 
+          'Signature rejected. Customer needs to submit a new signature.' : 
+          'Refund request rejected' 
       });
     }
 
@@ -13629,6 +13678,36 @@ app.post('/approveRefundRequest', async (req, res) => {
           return res.status(403).send({ 
             success: false, 
             message: 'Only Sales Executive leaders can approve at this stage' 
+          });
+        }
+        break;
+
+      case 'leader_signature_approval_pending':
+        if (user_role === 'Sales Executive') {
+          // Check if the approving user is a leader
+          const leaderValidation = await pool.query(
+            `SELECT is_leader FROM nano_user WHERE uid = $1`,
+            [user_uid]
+          );
+          
+          if (leaderValidation.rows.length === 0 || !leaderValidation.rows[0].is_leader) {
+            return res.status(403).send({ 
+              success: false, 
+              message: 'Only Sales Executive leaders can approve signatures at this stage' 
+            });
+          }
+          
+          newStatus = 'sales_coordinator_pending';
+          updateFields = {
+            leader_signature_approved: user_uid,
+            leader_signature_approved_date: 'CURRENT_TIMESTAMP',
+            current_approver_role: 'sales_coordinator'
+          };
+          approvalAction = 'leader_signature_approved';
+        } else {
+          return res.status(403).send({ 
+            success: false, 
+            message: 'Only Sales Executive leaders can approve signatures at this stage' 
           });
         }
         break;
@@ -13765,6 +13844,11 @@ app.post('/approveRefundRequest', async (req, res) => {
       queryParams.push(updateFields.leader_approved);
       paramIndex++;
     }
+    if (updateFields.leader_signature_approved) {
+      updateQuery += `, leader_signature_approved = $${paramIndex}, leader_signature_approved_date = CURRENT_TIMESTAMP`;
+      queryParams.push(updateFields.leader_signature_approved);
+      paramIndex++;
+    }
     if (updateFields.sales_coordinator_approved) {
       updateQuery += `, sales_coordinator_approved = $${paramIndex}, sales_coordinator_approved_date = CURRENT_TIMESTAMP`;
       queryParams.push(updateFields.sales_coordinator_approved);
@@ -13807,8 +13891,11 @@ app.post('/approveRefundRequest', async (req, res) => {
       user_id: user_uid,
       user_role: user_role,
       timestamp: new Date().toISOString(),
-      notes: action === 'approve' ? 'Request approved' : 'Request rejected'
+      notes: action === 'approve' ? 'Request approved' : 'Request rejected',
+      reason: reason || null // Also store reason separately for rejections
     });
+
+    // console.log('Final approval_history array before saving (length: ' + approvalHistory.length + '):', JSON.stringify(approvalHistory, null, 2));
 
     updateQuery += `, approval_history = $${paramIndex} WHERE id = $${paramIndex + 1}`;
     queryParams.push(JSON.stringify(approvalHistory), refund_request_id);
@@ -13864,7 +13951,8 @@ app.post('/getRefundRequests', async (req, res) => {
         u4.name_display as project_admin_name,
         u5.user_name as nanog_admin_name,
         u6.user_name as financial_name,
-        u7.user_name as accounts_name
+        u7.user_name as accounts_name,
+        u8.user_name as leader_signature_approver_name
       FROM nano_refund_requests r
       LEFT JOIN nano_leads l ON r.lead_id = l.id
       LEFT JOIN nano_sales s ON r.sale_id = s.id
@@ -13875,6 +13963,7 @@ app.post('/getRefundRequests', async (req, res) => {
       LEFT JOIN nano_user u5 ON r.nanog_admin_approved = u5.uid
       LEFT JOIN nano_user u6 ON r.financial_approved = u6.uid
       LEFT JOIN nano_user u7 ON r.accounts_approved = u7.uid
+      LEFT JOIN nano_user u8 ON r.leader_signature_approved = u8.uid
       WHERE 1=1
     `;
     let queryParams = [];
@@ -13889,11 +13978,6 @@ app.post('/getRefundRequests', async (req, res) => {
 
     // Filter based on user role
     if (user_role === 'Sales Executive') {
-      // Sales Executive can only see their own requests
-      query += ` AND r.consultant_id = $${paramIndex}`;
-      queryParams.push(user_uid);
-      paramIndex++;
-    } else if (user_role === 'Sales Executive') {
       // Check if user is a leader
       const leaderCheck = await pool.query(
         `SELECT is_leader FROM nano_user WHERE uid = $1`,
@@ -13901,10 +13985,12 @@ app.post('/getRefundRequests', async (req, res) => {
       );
       
       if (leaderCheck.rows.length > 0 && leaderCheck.rows[0].is_leader) {
-        // Leaders can see requests pending their approval + their own requests
-        query += ` AND (r.status = 'leader_pending' OR r.consultant_id = $${paramIndex})`;
-        queryParams.push(user_uid);
-        paramIndex++;
+        // Leaders can see all requests from their team + requests pending their approval + their own requests
+        // For now, leaders can see all requests (this may need refinement based on team structure)
+        // query += ` AND (r.status = 'leader_pending' OR r.consultant_id = $${paramIndex})`;
+        // Allow leaders to see all refund requests for oversight
+        // queryParams.push(user_uid);
+        // paramIndex++;
       } else {
         // Non-leaders can only see their own requests
         query += ` AND r.consultant_id = $${paramIndex}`;
@@ -13958,10 +14044,10 @@ app.post('/getRefundRequests', async (req, res) => {
       );
       
       if (leaderCheck.rows.length > 0 && leaderCheck.rows[0].is_leader) {
-        // Leaders can see requests pending their approval + their own requests
-        countQuery += ` AND (r.status = 'leader_pending' OR r.consultant_id = $${countParamIndex})`;
-        countParams.push(user_uid);
-        countParamIndex++;
+        // Leaders can see all requests for oversight
+        // countQuery += ` AND (r.status = 'leader_pending' OR r.consultant_id = $${countParamIndex})`;
+        // countParams.push(user_uid);
+        // countParamIndex++;
       } else {
         // Non-leaders can only see their own requests
         countQuery += ` AND r.consultant_id = $${countParamIndex}`;
@@ -14034,7 +14120,8 @@ app.post('/getRefundRequestDetails', async (req, res) => {
         u5.user_name as nanog_admin_name,
         u6.user_name as financial_name,
         u7.user_name as accounts_name,
-        u8.user_name as rejected_by_name
+        u8.user_name as rejected_by_name,
+        u9.user_name as leader_signature_approver_name
       FROM nano_refund_requests r
       LEFT JOIN nano_leads l ON r.lead_id = l.id
       LEFT JOIN nano_sales s ON r.sale_id = s.id
@@ -14046,6 +14133,7 @@ app.post('/getRefundRequestDetails', async (req, res) => {
       LEFT JOIN nano_user u6 ON r.financial_approved = u6.uid
       LEFT JOIN nano_user u7 ON r.accounts_approved = u7.uid
       LEFT JOIN nano_user u8 ON r.rejected_by_user_id = u8.uid
+      LEFT JOIN nano_user u9 ON r.leader_signature_approved = u9.uid
       WHERE r.id = $1`,
       [refund_request_id]
     );
@@ -14096,25 +14184,29 @@ app.post('/getRefundRequestDetails', async (req, res) => {
             actionDisplay = 'Leader Approval';
             step = 2;
             break;
+          case 'leader_signature_approved':
+            actionDisplay = 'Leader Signature Approval';
+            step = 3;
+            break;
           case 'sales_coordinator_approved':
             actionDisplay = 'Sales Coordinator Approval';
-            step = 3;
+            step = 4;
             break;
           case 'project_admin_approved':
             actionDisplay = 'Project Admin Approval';
-            step = 4;
+            step = 5;
             break;
           case 'nanog_admin_approved':
             actionDisplay = 'Nano G Admin Approval';
-            step = 5;
+            step = 6;
             break;
           case 'financial_approved':
             actionDisplay = 'Financial Approval';
-            step = 6;
+            step = 7;
             break;
           case 'accounts_approved':
             actionDisplay = 'Accounts Approval';
-            step = 7;
+            step = 8;
             break;
           case 'rejected':
             actionDisplay = 'Request Rejected';
@@ -14131,7 +14223,7 @@ app.post('/getRefundRequestDetails', async (req, res) => {
           action_display: actionDisplay,
           user_id: action.user_id,
           user_name: action.user_role === 'Project Admin' ? refundRequest.project_admin_name : 
-                    action.user_role === 'Sales Executive' ? refundRequest.leader_name :
+                    action.user_role === 'Sales Executive' ? (action.action === 'leader_signature_approved' ? refundRequest.leader_signature_approver_name : refundRequest.leader_name) :
                     action.user_role === 'Sales Coordinator' ? refundRequest.sales_coordinator_name :
                     action.user_role === 'Super Admin' || action.user_role === 'System Admin' ? refundRequest.nanog_admin_name :
                     action.user_role === 'Finance' ? refundRequest.financial_name :
@@ -14140,7 +14232,8 @@ app.post('/getRefundRequestDetails', async (req, res) => {
           user_role: action.user_role,
           timestamp: action.timestamp,
           status: refundRequest.status,
-          notes: action.notes || action.reason || 'Action completed',
+          notes: action.notes || 'Action completed',
+          reason: action.reason,
           completed: true,
           rejection_reason: action.reason || null
         });
