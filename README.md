@@ -172,6 +172,16 @@ The server includes various API endpoints for:
 - Worker performance tracking
 - File uploads
 - Firebase messaging
+- Favorite leads management
 - And more...
+
+### Favorite Leads API
+
+| Endpoint | Method | Description | Request Body | Response |
+|----------|--------|-------------|-------------|----------|
+| `/addLeadToFavorites` | POST | Add a lead to user's favorites | `{ "user_id": "string", "lead_id": number }` | `{ "success": boolean, "message": "string" }` |
+| `/removeLeadFromFavorites` | POST | Remove a lead from user's favorites | `{ "user_id": "string", "lead_id": number }` | `{ "success": boolean, "message": "string" }` |
+| `/getUserFavoriteLeads` | POST | Get all favorite leads for a user | `{ "user_id": "string" }` | `{ "success": boolean, "data": array }` |
+| `/isLeadFavorite` | POST | Check if a lead is in user's favorites | `{ "user_id": "string", "lead_id": number }` | `{ "success": boolean, "isFavorite": boolean }` |
 
 All endpoints are available in both development and production environments. 

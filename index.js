@@ -12823,6 +12823,237 @@ app.post('/getWorkersByRanking', async (req, res) => {
   }
 });
 
+// Add lead to favorites
+app.post('/addLeadToFavorites', async (req, res) => {
+  console.log('addLeadToFavorites');
+  const { user_id, lead_id } = req.body;
+  
+  if (!user_id || !lead_id) {
+    return res.status(400).send({
+      success: false,
+      message: 'User ID and Lead ID are required'
+    });
+  }
+
+  try {
+    // Check if the lead exists
+    const leadExists = await pool.query('SELECT id FROM nano_leads WHERE id = $1', [lead_id]);
+    
+    if (leadExists.rows.length === 0) {
+      return res.status(404).send({
+        success: false,
+        message: 'Lead not found'
+      });
+    }
+    
+    // Check if the user exists in nano_user or sub_user table
+    const userExistsNano = await pool.query('SELECT uid FROM nano_user WHERE uid = $1', [user_id]);
+    let userExists = userExistsNano.rows.length > 0;
+    
+    if (!userExists) {
+      // If not found in nano_user, check in sub_user
+      const userExistsSub = await pool.query('SELECT uid FROM sub_user WHERE uid = $1', [user_id]);
+      userExists = userExistsSub.rows.length > 0;
+    }
+    
+    if (!userExists) {
+      return res.status(404).send({
+        success: false,
+        message: 'User not found.'
+      });
+    }
+    
+    // Add to favorites (if not already added)
+    await pool.query(
+      'INSERT INTO nano_favorite_leads (user_id, lead_id) VALUES ($1, $2) ON CONFLICT (user_id, lead_id) DO NOTHING',
+      [user_id, lead_id]
+    );
+    
+    res.status(200).send({
+      success: true,
+      message: 'Lead added to favorites'
+    });
+  } catch (error) {
+    console.error('Error adding lead to favorites:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to add lead to favorites'
+    });
+  }
+});
+
+// Remove lead from favorites
+app.post('/removeLeadFromFavorites', async (req, res) => {
+  console.log('removeLeadFromFavorites');
+  const { user_id, lead_id } = req.body;
+  
+  if (!user_id || !lead_id) {
+    return res.status(400).send({
+      success: false,
+      message: 'User ID and Lead ID are required'
+    });
+  }
+
+  try {
+    // Check if the user exists in nano_user or sub_user table
+    const userExistsNano = await pool.query('SELECT uid FROM nano_user WHERE uid = $1', [user_id]);
+    let userExists = userExistsNano.rows.length > 0;
+    
+    if (!userExists) {
+      // If not found in nano_user, check in sub_user
+      const userExistsSub = await pool.query('SELECT uid FROM sub_user WHERE uid = $1', [user_id]);
+      userExists = userExistsSub.rows.length > 0;
+    }
+    
+    if (!userExists) {
+      return res.status(404).send({
+        success: false,
+        message: 'User not found.'
+      });
+    }
+    
+    const result = await pool.query(
+      'DELETE FROM nano_favorite_leads WHERE user_id = $1 AND lead_id = $2 RETURNING id',
+      [user_id, lead_id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).send({
+        success: false,
+        message: 'Favorite not found'
+      });
+    }
+    
+    res.status(200).send({
+      success: true,
+      message: 'Lead removed from favorites'
+    });
+  } catch (error) {
+    console.error('Error removing lead from favorites:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to remove lead from favorites'
+    });
+  }
+});
+
+// Get user's favorite leads
+app.post('/getUserFavoriteLeads', async (req, res) => {
+  console.log('getUserFavoriteLeads');
+  const { user_id } = req.body;
+  
+  if (!user_id) {
+    return res.status(400).send({
+      success: false,
+      message: 'User ID is required'
+    });
+  }
+
+  try {
+    // Check if the user exists in nano_user or sub_user table
+    const userExistsNano = await pool.query('SELECT uid FROM nano_user WHERE uid = $1', [user_id]);
+    let userExists = userExistsNano.rows.length > 0;
+    
+    if (!userExists) {
+      // If not found in nano_user, check in sub_user
+      const userExistsSub = await pool.query('SELECT uid FROM sub_user WHERE uid = $1', [user_id]);
+      userExists = userExistsSub.rows.length > 0;
+    }
+    
+    if (!userExists) {
+      return res.status(404).send({
+        success: false,
+        message: 'User not found.'
+      });
+    }
+    
+    const result = await pool.query(`
+      SELECT nl.*, nfl.created_at as favorited_at,
+      COALESCE(
+        (SELECT user_name FROM nano_user WHERE uid = nl.created_by),
+        (SELECT user_name FROM sub_user WHERE uid = nl.created_by)
+      ) as created_by_name,
+      COALESCE(
+        (SELECT user_name FROM nano_user WHERE uid = nl.sales_coordinator),
+        (SELECT user_name FROM sub_user WHERE uid = nl.sales_coordinator)
+      ) as sales_coordinator_name
+      FROM nano_favorite_leads nfl
+      JOIN nano_leads nl ON nfl.lead_id = nl.id
+      WHERE nfl.user_id = $1
+      ORDER BY nfl.created_at DESC
+    `, [user_id]);
+    
+    res.status(200).send({
+      success: true,
+      data: result.rows
+    });
+  } catch (error) {
+    console.error('Error getting favorite leads:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to get favorite leads'
+    });
+  }
+});
+
+// Check if lead is favorited by user
+app.post('/isLeadFavorite', async (req, res) => {
+  console.log('isLeadFavorite');
+  const { user_id, lead_id } = req.body;
+  
+  if (!user_id || !lead_id) {
+    return res.status(400).send({
+      success: false,
+      message: 'User ID and Lead ID are required'
+    });
+  }
+
+  try {
+    // Check if the user exists in nano_user or sub_user table
+    const userExistsNano = await pool.query('SELECT uid FROM nano_user WHERE uid = $1', [user_id]);
+    let userExists = userExistsNano.rows.length > 0;
+    
+    if (!userExists) {
+      // If not found in nano_user, check in sub_user
+      const userExistsSub = await pool.query('SELECT uid FROM sub_user WHERE uid = $1', [user_id]);
+      userExists = userExistsSub.rows.length > 0;
+    }
+    
+    if (!userExists) {
+      return res.status(404).send({
+        success: false,
+        message: 'User not found.'
+      });
+    }
+    
+    // Check if lead exists
+    const leadExists = await pool.query('SELECT id FROM nano_leads WHERE id = $1', [lead_id]);
+    
+    if (leadExists.rows.length === 0) {
+      return res.status(404).send({
+        success: false,
+        message: 'Lead not found'
+      });
+    }
+    
+    const result = await pool.query(
+      'SELECT id FROM nano_favorite_leads WHERE user_id = $1 AND lead_id = $2',
+      [user_id, lead_id]
+    );
+    
+    res.status(200).send({
+      success: true,
+      isFavorite: result.rows.length > 0
+    });
+  } catch (error) {
+    console.error('Error checking favorite status:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to check favorite status'
+    });
+  }
+});
+
 // Get worker performance details
 app.post('/getWorkerPerformance', async (req, res) => {
   console.log('getWorkerPerformance');
