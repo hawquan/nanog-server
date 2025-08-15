@@ -12779,7 +12779,6 @@ app.post('/getWorkersByRanking', async (req, res) => {
         FROM active_workers
         WHERE complaint_count > 0
         ORDER BY complaint_count DESC, appointment_count ASC
-        LIMIT 10
       ),
       best_workers AS (
         SELECT *
