@@ -7362,7 +7362,22 @@ app.post('/getWarrantySalesPackage', (req, res) => {
 app.post('/getSalesPackageDetails', (req, res) => {
   console.log('getSalesPackageDetails')
 
-  pool.query(`SELECT *, nsl.area as area2, nsl.sqft as sqft2 FROM nano_sales_package nsl LEFT JOIN nano_packages ns ON nsl.package_id = ns.id WHERE sales_id = $1 ORDER BY nsl.sap_id `, [req.body.sales_id]).then((result) => {
+  pool.query(`
+    SELECT 
+      *,
+      nsl.area as area2,
+      nsl.sqft as sqft2,
+      nsl.area_measurement,
+      nsl.measurement_added_at,
+      COALESCE(
+        (SELECT user_name FROM nano_user WHERE uid = nsl.measurement_added_by),
+        (SELECT user_name FROM sub_user WHERE uid = nsl.measurement_added_by)
+      ) as measurement_added_by_name
+    FROM nano_sales_package nsl 
+    LEFT JOIN nano_packages ns ON nsl.package_id = ns.id 
+    WHERE sales_id = $1 
+    ORDER BY nsl.sap_id
+  `, [req.body.sales_id]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -7376,7 +7391,22 @@ app.post('/getSalesPackageDetails', (req, res) => {
 app.post('/getMainAndAddOnPackages', (req, res) => {
   console.log('getMainAndAddOnPackages')
 
-  pool.query(`SELECT *, nsl.area as area2, nsl.sqft as sqft2 FROM nano_sales_package nsl LEFT JOIN nano_packages ns ON nsl.package_id = ns.id WHERE nsl.sap_id = $1 OR nsl.addon_id = $1 ORDER BY nsl.sap_id ASC`, [req.body.sap_id]).then((result) => {
+  pool.query(`
+    SELECT 
+      *,
+      nsl.area as area2,
+      nsl.sqft as sqft2,
+      nsl.area_measurement,
+      nsl.measurement_added_at,
+      COALESCE(
+        (SELECT user_name FROM nano_user WHERE uid = nsl.measurement_added_by),
+        (SELECT user_name FROM sub_user WHERE uid = nsl.measurement_added_by)
+      ) as measurement_added_by_name
+    FROM nano_sales_package nsl 
+    LEFT JOIN nano_packages ns ON nsl.package_id = ns.id 
+    WHERE nsl.sap_id = $1 OR nsl.addon_id = $1 
+    ORDER BY nsl.sap_id ASC
+  `, [req.body.sap_id]).then((result) => {
 
     return res.status(200).send({ data: result.rows, success: true })
 
@@ -13050,6 +13080,80 @@ app.post('/isLeadFavorite', async (req, res) => {
     res.status(500).send({
       success: false,
       message: 'Failed to check favorite status'
+    });
+  }
+});
+
+// Add area measurement to sales package
+app.post('/addAreaMeasurement', async (req, res) => {
+  console.log('addAreaMeasurement');
+  const { sap_id, area_measurement, user_id } = req.body;
+
+  if (!sap_id || !area_measurement || !user_id) {
+    return res.status(400).send({
+      success: false,
+      message: 'Sales package ID, area measurement, and user ID are required'
+    });
+  }
+
+  try {
+    // Check if measurement already exists
+    const existingMeasurement = await pool.query(
+      'SELECT area_measurement FROM nano_sales_package WHERE sap_id = $1',
+      [sap_id]
+    );
+
+    if (existingMeasurement.rows[0]?.area_measurement !== null) {
+      return res.status(400).send({
+        success: false,
+        message: 'Area measurement has already been added and cannot be modified'
+      });
+    }
+
+    // Check if user exists in either nano_user or sub_user
+    const userExistsNano = await pool.query('SELECT uid FROM nano_user WHERE uid = $1', [user_id]);
+    let userExists = userExistsNano.rows.length > 0;
+    
+    if (!userExists) {
+      const userExistsSub = await pool.query('SELECT uid FROM sub_user WHERE uid = $1', [user_id]);
+      userExists = userExistsSub.rows.length > 0;
+    }
+    
+    if (!userExists) {
+      return res.status(404).send({
+        success: false,
+        message: 'User not found.'
+      });
+    }
+
+    // Add the measurement
+    const result = await pool.query(
+      `UPDATE nano_sales_package 
+       SET area_measurement = $1, 
+           measurement_added_at = CURRENT_TIMESTAMP,
+           measurement_added_by = $2
+       WHERE sap_id = $3
+       RETURNING *`,
+      [area_measurement, user_id, sap_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send({
+        success: false,
+        message: 'Sales package not found'
+      });
+    }
+
+    res.status(200).send({
+      success: true,
+      message: 'Area measurement added successfully',
+      data: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Error adding area measurement:', error);
+    res.status(500).send({
+      success: false,
+      message: 'Failed to add area measurement'
     });
   }
 });
