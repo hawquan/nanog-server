@@ -12999,6 +12999,8 @@ app.post('/getUserFavoriteLeads', async (req, res) => {
     
     const result = await pool.query(`
       SELECT nl.*, nfl.created_at as favorited_at,
+      a.id AS appointment_id, a.kiv, a.appointment_time, a.remark, a.appointment_status,
+      nls.status as whole_status, nls.payment_status, nls.sales_status,
       COALESCE(
         (SELECT user_name FROM nano_user WHERE uid = nl.created_by),
         (SELECT user_name FROM sub_user WHERE uid = nl.created_by)
@@ -13006,9 +13008,17 @@ app.post('/getUserFavoriteLeads', async (req, res) => {
       COALESCE(
         (SELECT user_name FROM nano_user WHERE uid = nl.sales_coordinator),
         (SELECT user_name FROM sub_user WHERE uid = nl.sales_coordinator)
-      ) as sales_coordinator_name
+      ) as sales_coordinator_name,
+      (SELECT CASE
+        WHEN COUNT(*) > 0 THEN true
+        ELSE false
+        END FROM nano_sales_order nso WHERE nso.sales_id = nls.id
+      ) AS has_sales_order_form,
+      row_number() over (partition by nl.customer_phone ORDER BY nl.created_date ASC) as phone_row_number
       FROM nano_favorite_leads nfl
       JOIN nano_leads nl ON nfl.lead_id = nl.id
+      LEFT JOIN nano_appointment a ON a.lead_id = nl.id
+      LEFT JOIN nano_sales nls ON nls.appointment_id = a.id
       WHERE nfl.user_id = $1
       ORDER BY nfl.created_at DESC
     `, [user_id]);
